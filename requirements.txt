@@ -1,0 +1,11 @@
+# Install torch and torch-geometric first, following the links in README.md
+pandas
+numpy
+scikit-learn
+xgboost
+networkx
+pyyaml
+neo4j
+streamlit
+streamlit-agraph
+pytest

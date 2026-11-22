@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.egg-info/
+.env
+.pytest_cache/
+.ipynb_checkpoints/
+
+data/raw/*
+data/processed/*
+results/*
+neo4j_data/
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!results/.gitkeep

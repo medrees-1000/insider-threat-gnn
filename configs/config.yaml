@@ -1,0 +1,14 @@
+raw_dir: data/raw
+results_dir: results
+
+n_users: 300        # subsample size; set higher once the pipeline works
+seed: 42
+val_size: 0.15
+test_size: 0.30
+
+model:
+  hidden: 64
+  dropout: 0.3
+  lr: 0.01
+  weight_decay: 0.0005
+  epochs: 200
