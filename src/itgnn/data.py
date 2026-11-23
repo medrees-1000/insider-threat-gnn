@@ -17,11 +17,21 @@ def load_config(path="configs/config.yaml"):
         return yaml.safe_load(f)
 
 
-def load_log(raw_dir, name):
-    """Read one CERT log (logon, device or file) with only the columns we need."""
+def load_log(raw_dir, name, cache_dir=None):
+    """Read one CERT log (logon, device or file) with only the columns we need.
+
+    If cache_dir is given, the slimmed log is saved there as <name>.parquet on
+    first read and reused afterwards. Delete the parquet to force a re-read.
+    """
+    cached = Path(cache_dir) / f"{name}.parquet" if cache_dir else None
+    if cached is not None and cached.exists():
+        return pd.read_parquet(cached)
     filename, cols = LOG_SPECS[name]
     df = pd.read_csv(Path(raw_dir) / filename, usecols=cols)
     df["date"] = pd.to_datetime(df["date"])
+    if cached is not None:
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(cached, index=False)
     return df
 
 
@@ -37,9 +47,9 @@ def load_labels(raw_dir, release="4.2"):
 
 
 def subsample_users(users, labels, n, seed):
-    """Pick n users, keeping the malicious share the same as in the full set."""
+    """Pick n users, keeping the malicious share the same as in the full set. n=None keeps all."""
     users = sorted(users)
-    if n >= len(users):
+    if n is None or n >= len(users):
         return users
     y = [u in labels for u in users]
     picked, _ = train_test_split(users, train_size=n, stratify=y, random_state=seed)
@@ -62,9 +72,9 @@ def make_split(users, labels, val_size, test_size, seed):
 def prepare(cfg):
     """Load everything once: logs, labels, chosen users and the split."""
     raw = cfg["raw_dir"]
-    logon = load_log(raw, "logon")
-    device = load_log(raw, "device")
-    file = load_log(raw, "file")
+    logon = load_log(raw, "logon", cache_dir="data/processed")
+    device = load_log(raw, "device", cache_dir="data/processed")
+    file = load_log(raw, "file", cache_dir="data/processed")
     labels = load_labels(raw)
     users = subsample_users(logon["user"].unique(), labels, cfg["n_users"], cfg["seed"])
     split = make_split(users, labels, cfg["val_size"], cfg["test_size"], cfg["seed"])

@@ -1,8 +1,11 @@
 raw_dir: data/raw
 results_dir: results
 
-n_users: 300        # subsample size; set higher once the pipeline works
+n_users: null       # subsample size; null = use all users
 seed: 42
+cv:
+  n_splits: 5
+  n_repeats: 5
 val_size: 0.15
 test_size: 0.30
 

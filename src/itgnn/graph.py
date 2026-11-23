@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 
 FEATURE_COLS = ["n_logon", "n_after_hours", "n_pcs", "n_device", "n_file"]
+FEATURE_COLS_B = FEATURE_COLS + ["active_days"] + [f"{c}_per_day" for c in FEATURE_COLS]
 
 
 def user_features(logon, device, file, users):
@@ -20,6 +21,17 @@ def user_features(logon, device, file, users):
     feats["n_device"] = device[device["user"].isin(users)].groupby("user").size()
     feats["n_file"] = file[file["user"].isin(users)].groupby("user").size()
     return feats.reindex(users).fillna(0)[FEATURE_COLS]
+
+
+def user_features_extended(logon, device, file, users):
+    """Feature set B: the five counts, active_days (distinct days with a Logon) and per-active-day rates."""
+    feats = user_features(logon, device, file, users)
+    lg = logon[(logon["activity"] == "Logon") & logon["user"].isin(users)]
+    days = lg.groupby("user")["date"].apply(lambda d: d.dt.normalize().nunique())
+    feats["active_days"] = days.reindex(users).fillna(0)
+    for c in FEATURE_COLS:
+        feats[f"{c}_per_day"] = (feats[c] / feats["active_days"]).where(feats["active_days"] > 0, 0.0)
+    return feats[FEATURE_COLS_B]
 
 
 def logon_edges(logon, users):

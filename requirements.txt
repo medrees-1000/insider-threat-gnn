@@ -9,3 +9,8 @@ neo4j
 streamlit
 streamlit-agraph
 pytest
+jupyter
+ipykernel
+matplotlib
+seaborn
+pyarrow
