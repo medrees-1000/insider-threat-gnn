@@ -1,5 +1,6 @@
 """Repeated cross-validation folds over users and ranking metrics for model comparison."""
 import numpy as np
+import pandas as pd
 from sklearn.metrics import average_precision_score, roc_auc_score
 from sklearn.model_selection import RepeatedStratifiedKFold
 
@@ -61,3 +62,34 @@ def summarize(results_df):
     metrics = [c for c in results_df.columns if c in
                ("pr_auc", "roc_auc", "precision_at_k", "recall_at_k")]
     return results_df.groupby("model")[metrics].agg(["mean", "std"])
+
+
+def alert_budget(oof, labels, scenario_of, qs, seed):
+    """Alert-budget table from out-of-fold scores (same logic as notebooks 04 and 05).
+
+    oof needs model, repeat, fold, user, score, label. In every (model, repeat, fold) the top
+    ceil(q% of rows) are flagged (ties broken at random, rng seeded with seed + repeat); the folds of
+    a repeat are then pooled so each user appears once. Returns one row per (model, q%, repeat):
+    caught (insiders with >=1 flagged attack week), normal flagged (distinct users not in labels),
+    weeks flagged, and per scenario s: `caught s{s}` and `attack weeks s{s}` (flagged attack weeks).
+    """
+    labels = set(labels)
+    scens = sorted(set(scenario_of.values()))
+    rows = []
+    for (name, r), g in oof.groupby(["model", "repeat"]):
+        rng = np.random.default_rng(seed + r)
+        parts = {q: [] for q in qs}
+        for _, gf in g.groupby("fold"):
+            order = np.lexsort((rng.random(len(gf)), -gf["score"].to_numpy()))
+            for q in qs:
+                parts[q].append(gf.iloc[order[: int(np.ceil(q / 100 * len(gf)))]])
+        for q in qs:
+            fl = pd.concat(parts[q])
+            att = fl[fl["label"] == 1].assign(scenario=lambda x: x["user"].map(scenario_of))
+            row = {"model": name, "q%": q, "repeat": r, "caught": att["user"].nunique(),
+                   "normal flagged": fl.loc[~fl["user"].isin(labels), "user"].nunique(), "weeks flagged": len(fl)}
+            for s in scens:
+                row[f"caught s{s}"] = att.loc[att["scenario"] == s, "user"].nunique()
+                row[f"attack weeks s{s}"] = int((att["scenario"] == s).sum())
+            rows.append(row)
+    return pd.DataFrame(rows)

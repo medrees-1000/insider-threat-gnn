@@ -15,3 +15,16 @@ model:
   lr: 0.01
   weight_decay: 0.0005
   epochs: 200
+
+gnn:                  # light weekly GNN (notebook 05); heavier variants change layers / hidden / conv
+  conv: sage          # sage | mlp (mlp = same network without edges)
+  layers: 2
+  hidden: 64
+  dropout: 0.3
+  lr: 0.01
+  weight_decay: 0.0005
+  class_weight: sqrt  # sqrt(neg/pos) of the training rows, capped
+  max_class_weight: 50
+  epochs: {mlp: 188, sage: 224}   # chosen once by the pilot (notebook 05; repeat 0 fold 0 training users, earliest epoch within 0.01 of the best smoothed val PR-AUC), fixed for all 25 folds
+  pilot: {n_inner_splits: 3, inner_val_size: 0.2, max_epochs: 300, smooth: 5, tolerance: 0.01}
+  n_seeds: 5          # seed-variance check on repeat 0 fold 0
