@@ -16,6 +16,28 @@ REL = {"LOGGED_ON": "logons", "VISITED": "visits", "EMAILED": "mails"}
 WEEK_PROPS = ["user", "score", "score_sd", "score_generic", "cal_week", "top_groups", "n_external_recipients"]
 
 
+def load_queries(path="neo4j/queries.cypher"):
+    """{name: {"what": description, "cypher": query}} parsed from the annotated .cypher file ('// name:' starts a query)."""
+    out, cur = {}, None
+    for line in Path(path).read_text().splitlines():
+        if line.startswith("// name:"):
+            cur = line.split(":", 1)[1].strip(); out[cur] = {"what": "", "cypher": ""}
+        elif cur and line.startswith("// what:"):
+            out[cur]["what"] = line.split(":", 1)[1].strip()
+        elif cur and not line.startswith("//") and line.strip():
+            out[cur]["cypher"] += line.strip() + " "
+    return {k: {"what": v["what"], "cypher": v["cypher"].strip()} for k, v in out.items()}
+
+
+def browser_link(cypher, base="http://localhost:7474", **params):
+    """Neo4j Browser URL that pre-fills the editor with the query; `$name` placeholders are replaced by quoted literals."""
+    from urllib.parse import quote
+
+    for k, v in params.items():
+        cypher = cypher.replace(f"${k}", "'" + str(v).replace("'", "\\'") + "'")
+    return f"{base}/browser/?cmd=edit&arg={quote(cypher)}"
+
+
 def load_env(path=".env"):
     """Read KEY=VALUE lines into os.environ without overriding variables that are already set."""
     p = Path(path)
@@ -97,6 +119,13 @@ NEIGHBOURHOOD = (
 )
 
 
+ALL_EDGES = (
+    "MATCH (w:UserWeek)-[e:LOGGED_ON|VISITED|EMAILED]->(o) "
+    "RETURN w.user AS user, w.week_start AS week_start, type(e) AS edge_type, coalesce(o.id, o.name) AS other_id, labels(o)[0] AS other_kind, "
+    "coalesce(e.logons, e.visits, e.mails) AS weight, o.category AS category, e.other_users AS other_users"
+)
+
+
 class Neo4jSource:
     """Neighbourhood of a user-week from Neo4j (the preferred backend); returns the same frame as ParquetSource."""
 
@@ -108,6 +137,17 @@ class Neo4jSource:
     def has_week(self, user, week_start):
         with self.driver.session() as s:
             return s.execute_read(lambda tx: tx.run("MATCH (w:UserWeek {key: $key}) RETURN count(w) AS n", key=week_key(user, week_start)).single()["n"]) > 0
+
+    def all_edges(self):
+        """Same table as ParquetSource.all_edges, from one Cypher query."""
+        with self.driver.session() as s:
+            rows = s.execute_read(lambda tx: [r.data() for r in tx.run(ALL_EDGES)])
+        e = pd.DataFrame(rows, columns=["user", "week_start", "edge_type", "other_id", "other_kind", "weight", "category", "other_users"])
+        e["week_start"] = pd.to_datetime(e["week_start"])
+        e["weight"] = e["weight"].astype(float)
+        e["category"] = e["category"].fillna("")
+        e["other_users"] = e["other_users"].astype(float)
+        return e.sort_values(["user", "week_start", "edge_type", "other_id"]).reset_index(drop=True)
 
     def neighbourhood(self, user, week_start):
         key = week_key(user, week_start)

@@ -60,5 +60,10 @@ def test_ui_modules_do_not_train_or_write():
         full = {n for node in ast.walk(ast.parse(src)) for n in (
             [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""] if isinstance(node, ast.ImportFrom) else [])}
         assert not {n.split(".")[0] for n in full} & banned and not full & banned_modules, (f, full)
-    app = Path("app/streamlit_app.py").read_text()
-    assert ".fit(" not in app and "to_parquet" not in app and "open(" not in app
+    # the app only reads: no training, fitting, writing or opening files (checked on the syntax tree, not on text)
+    forbidden_attrs = {"fit", "train", "to_parquet", "to_csv", "write_text", "write_bytes", "save_model"}
+    for f in ["app/streamlit_app.py", "app/threat_map.py"]:
+        for node in ast.walk(ast.parse(Path(f).read_text())):
+            if isinstance(node, ast.Call):
+                name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+                assert name not in forbidden_attrs and not (name == "open" and isinstance(node.func, ast.Name)), (f, name)

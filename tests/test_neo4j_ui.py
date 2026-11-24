@@ -90,3 +90,19 @@ def test_env_and_auto_source_fallback(tmp_path, monkeypatch, ui_results):
     monkeypatch.setattr(N, "get_driver", lambda *a, **k: (_ for _ in ()).throw(ConnectionError("down")))
     src, note = N.auto_source(str(ui_results))
     assert src.name == "parquet" and "fallback" in note
+
+
+def test_queries_file_and_browser_links():
+    q = N.load_queries()
+    assert set(q) == {"neighbourhood", "visitors", "shared_pc", "campaign"} and all(v["cypher"].startswith("MATCH") and v["what"] for v in q.values())
+    link = N.browser_link(q["neighbourhood"]["cypher"], key="U1|2010-07-12")
+    assert link.startswith("http://localhost:7474/browser/?cmd=edit&arg=") and "%27U1%7C2010-07-12%27" in link and "%24key" not in link
+    assert "wikileaks.org" in N.browser_link(q["visitors"]["cypher"], domain="wikileaks.org").replace("%27", "'")
+
+
+def test_all_edges_is_identical_on_both_backends(ui_results):
+    p = U.ParquetSource(ui_results).all_edges()
+    rows = [dict(user=r.user, week_start=r.week_start.strftime("%Y-%m-%d"), edge_type=r.edge_type, other_id=r.other_id, other_kind=r.other_kind, weight=r.weight,
+                 category=(r.category or None), other_users=(None if pd.isna(r.other_users) else r.other_users)) for r in p.itertuples()]
+    got = N.Neo4jSource(FakeDriver(rows)).all_edges()
+    pd.testing.assert_frame_equal(got[p.columns], p, check_dtype=False)

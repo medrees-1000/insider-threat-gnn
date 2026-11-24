@@ -85,6 +85,10 @@ class ParquetSource:
     def has_week(self, user, week_start):
         return bool((self.edges["key"] == week_key(user, week_start)).any())
 
+    def all_edges(self):
+        """Every exported edge row (user, week_start, edge_type, other_id, other_kind, weight, category, other_users)."""
+        return self.edges.drop(columns="key").sort_values(["user", "week_start", "edge_type", "other_id"]).reset_index(drop=True)
+
     def neighbourhood(self, user, week_start):
         e = self.edges[self.edges["key"] == week_key(user, week_start)]
         out = e[EDGE_COLS].copy()
