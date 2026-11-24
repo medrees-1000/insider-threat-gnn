@@ -100,3 +100,72 @@ def test_comms_feature_sets_membership():
     nfs = set(s["W2+E+H no-first-seen"])
     assert not {"em_n_new_recip", "dev_wb_share_rare", "hist_mean_wb_n_new_domains"} & nfs and "wb_n_leak" in nfs
     assert all(c in full for c in nfs - {"a", "b"}) and s["W2+calendar"] == ["a", "b", "cal_week"]
+
+
+def test_audit_groups_cover_every_column_and_history_group():
+    from itgnn.comms_audit import audit_groups
+    from itgnn.commslogs import comms_feature_sets
+    from itgnn.weekly_features import FEATURE_SETS
+    cols = comms_feature_sets(FEATURE_SETS["W2"])["W2+E+H"]
+    g = audit_groups(cols)  # asserts full coverage
+    assert len(g) == 9 and set(g["history/deviation"]) == {c for c in cols if c.startswith(("hist_mean_", "dev_"))}
+    assert "wb_n_leak" in g["named-site"] and "dev_wb_n_leak" in g["named-site"] and "wb_n_leak" not in g["web volume"]
+    assert "n_new_pcs" in g["W2 base"] and "em_n_new_recip" in g["first-seen"]
+
+
+def test_grouped_permutation_importance_finds_signal_and_not_noise():
+    import numpy as np
+    from sklearn.ensemble import RandomForestClassifier
+    from itgnn.comms_audit import grouped_permutation_importance
+    rng = np.random.default_rng(0)
+    n = 600
+    X = pd.DataFrame({"sig": rng.normal(size=n), "noise": rng.normal(size=n)})
+    y = (X["sig"] + 0.3 * rng.normal(size=n) > 1.2).astype(int)
+    m = RandomForestClassifier(n_estimators=50, min_samples_leaf=5, random_state=0).fit(X[:300], y[:300])
+    imp = grouped_permutation_importance(m, X[300:], y[300:], {"s": ["sig"], "n": ["noise"]}, n_shuffles=3).groupby("group")["drop"].mean()  # held-out rows
+    assert imp["s"] > 0.2 and abs(imp["n"]) < 0.1
+
+
+def test_truncation_check_passes_and_positive_control_fails():
+    import numpy as np
+    from itgnn.comms_audit import truncation_check
+    from itgnn.commslogs import NEW_BASE, add_comms_features
+    T = pd.Timestamp
+    wk = lambda k: MONDAYS[k]
+    lg = pd.DataFrame([(u, wk(k) + pd.Timedelta(days=d, hours=9), f"PC{(k + d) % 3}", "Logon") for u in ("a", "b") for k in range(7) for d in (0, 3)],
+                      columns=["user", "date", "pc", "activity"])
+    empty = pd.DataFrame({"user": pd.Series(dtype=object), "date": pd.Series(dtype="datetime64[ns]")})
+    em = pd.DataFrame([(u, wk(k) + pd.Timedelta(days=d, hours=10), f"r{k}@x.com;q@dtaa.com", "", "", "u@dtaa.com", 10 + k, "0")
+                       for u in ("a", "b") for k in range(7) for d in (1, 4)],
+                      columns=["user", "date", "to", "cc", "bcc", "from", "size", "attachments"])
+    ag = pd.DataFrame([(u, wk(k), dom, 1 + k, 0) for u in ("a", "b") for k in range(7) for dom in ("d1.com", f"d{k}.com")],
+                      columns=["user", "week_start", "domain", "n", "n_ah"])
+    from itgnn.windows import make_weekly_features
+    full = add_history_features_for_test(lg, empty)
+    full, _ = add_comms_features(full, em, ag)
+    cols = NEW_BASE + [f"hist_mean_{c}" for c in NEW_BASE] + ["n_logon", "n_new_pcs"]
+    sample = full[full["week_start"] == wk(6)][["user", "week_start"]]
+    ok = truncation_check(sample, lg, empty, empty, em, ag, full, cols)
+    assert (ok["max_abs_diff"] == 0).all()
+    bad = truncation_check(sample, lg, empty, empty, em, ag, full, cols, cut_days=2)  # cuts days 2-6 of the week
+    assert (bad["max_abs_diff"] > 0).any()
+
+
+def add_history_features_for_test(lg, empty):
+    from itgnn.weekly_features import add_history_features
+    from itgnn.windows import make_weekly_features
+    return add_history_features(make_weekly_features(lg, empty, empty, set(lg["user"])), lg)
+
+
+def test_position_and_phase_helpers():
+    from itgnn.comms_audit import attack_week_position, flag_top_q, window_phase
+    d = pd.date_range("2010-01-04", periods=8, freq="7D")
+    oof = pd.DataFrame({"user": ["u"] * 8, "week_start": d, "fold": 0, "score": np.arange(8, dtype=float),
+                        "label": [0, 0, 1, 1, 1, 0, 0, 0]}) if False else pd.DataFrame(
+        {"user": ["u"] * 8, "week_start": d, "fold": 0, "score": [float(i) for i in range(8)], "label": [0, 0, 1, 1, 1, 0, 0, 0]})
+    win = pd.DataFrame({"user": ["u"], "start": [d[2] + pd.Timedelta(days=1)], "end": [d[4] + pd.Timedelta(days=2)]})
+    a = attack_week_position(oof, win)
+    assert list(a["position"]) == ["first", "middle", "last"] and (a["win_days"] == 16).all()
+    ph = window_phase(oof, win).set_index("week_start")["phase"]
+    assert ph[d[1]] == "before" and ph[d[3]] == "inside" and ph[d[5]] == "after" and ph[d[7]] == "after"
+    assert flag_top_q(oof, 25, 0).sum() == 2 and flag_top_q(oof, 25, 0)[[6, 7]].all()
