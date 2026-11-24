@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 
@@ -169,3 +170,23 @@ def test_position_and_phase_helpers():
     ph = window_phase(oof, win).set_index("week_start")["phase"]
     assert ph[d[1]] == "before" and ph[d[3]] == "inside" and ph[d[5]] == "after" and ph[d[7]] == "after"
     assert flag_top_q(oof, 25, 0).sum() == 2 and flag_top_q(oof, 25, 0)[[6, 7]].all()
+
+
+def test_time_split_masks_and_bootstrap_and_reference():
+    from itgnn.comms_eval import double_holdout_masks, same_rows_user_split_ap, time_split_masks, user_bootstrap_ap
+    w = pd.DataFrame({"user": list("aabbcc"), "cal_week": [1, 5, 2, 6, 3, 9]})
+    tr, te = time_split_masks(w, 4)
+    assert tr.tolist() == [True, False, True, False, True, False] and te.tolist() == [not t for t in tr]
+    assert set(w.loc[tr, "user"]) & set(w.loc[te, "user"])  # same users on both sides
+    tr2, te2 = double_holdout_masks(w, {"train": ["a", "b"], "test": ["c"]}, 4)
+    assert w.loc[tr2, "user"].tolist() == ["a", "b"] and w.loc[te2, "user"].tolist() == ["c"]
+    rng = np.random.default_rng(0)
+    y = np.r_[np.ones(20), np.zeros(180)].astype(int)
+    users = np.repeat(np.arange(40), 5)
+    good, bad = y + rng.normal(0, 0.3, 200), rng.normal(size=200)
+    b = user_bootstrap_ap(y, {"good": good, "bad": bad}, users, n_boot=30, seed=1)
+    assert (b["good"] > b["bad"]).mean() > 0.9 and b.shape == (30, 2)
+    b2 = user_bootstrap_ap(y, {"good": good, "bad": bad}, users, n_boot=30, seed=1)
+    pd.testing.assert_frame_equal(b, b2)  # deterministic
+    oof = pd.DataFrame({"model": "m", "repeat": [0] * 4 + [1] * 4, "cal_week": [1, 5, 6, 7] * 2, "label": [1, 1, 0, 0] * 2, "score": [0.1, 0.8, 0.9, 0.1] * 2})
+    assert abs(same_rows_user_split_ap(oof, "m", 4) - 0.5) < 1e-9  # rows with cal_week 5,6,7: labels 1,0,0, scores .8,.9,.1 -> the positive is ranked 2nd -> AP 0.5

@@ -10,7 +10,23 @@ from torch_geometric.nn import SAGEConv
 
 from itgnn.weekly_graph import fold_masks, node_features
 
-CONVS = {"sage": SAGEConv, "mlp": nn.Linear}  # add gcn / gat here later (GAT needs head handling)
+class WSageConv(nn.Module):
+    """GraphSAGE with a weighted mean: lin_l(A x) + lin_r(x), A = row-normalised sparse adjacency.
+
+    Same two linear maps as SAGEConv (bias on lin_l only). With unit weights it equals SAGEConv(aggr="mean").
+    The forward takes the sparse matrix where the other convs take edge_index.
+    """
+
+    def __init__(self, in_dim, out_dim):
+        super().__init__()
+        self.lin_l = nn.Linear(in_dim, out_dim)
+        self.lin_r = nn.Linear(in_dim, out_dim, bias=False)
+
+    def forward(self, x, A):
+        return self.lin_l(torch.sparse.mm(A, x)) + self.lin_r(x)
+
+
+CONVS = {"sage": SAGEConv, "mlp": nn.Linear, "wsage": WSageConv}  # add gcn / gat here later (GAT needs head handling)
 
 
 class WeeklyNet(nn.Module):

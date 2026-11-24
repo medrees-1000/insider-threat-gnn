@@ -28,3 +28,8 @@ gnn:                  # light weekly GNN (notebook 05); heavier variants change 
   epochs: {mlp: 188, sage: 224}   # chosen once by the pilot (notebook 05; repeat 0 fold 0 training users, earliest epoch within 0.01 of the best smoothed val PR-AUC), fixed for all 25 folds
   pilot: {n_inner_splits: 3, inner_val_size: 0.2, max_epochs: 300, smooth: 5, tolerance: 0.01}
   n_seeds: 5          # seed-variance check on repeat 0 fold 0
+
+gnn2:                 # graph v2 on the W2+E+H features (notebooks 09-10; log 6f/6h); same recipe as `gnn:`
+  k_domain: 5         # top domains per user-week (K), chosen by the B0 timing rule, never changed after results
+  k_email: 5          # top recipients per sender-week
+  epochs: {mlp: 64, wsage: 75}   # pilot on repeat-0 fold-0 training users (notebook 10); the shuffled control reuses the wsage count
