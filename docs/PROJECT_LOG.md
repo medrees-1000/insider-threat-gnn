@@ -1,6 +1,6 @@
 # Project log
 
-Last updated: end of step 5 (light GNN on weekly graphs) and the decision for the next step (option B: email/web data). Everything below comes from the repo, notebook
+Last updated: end of step 6 (email/web probe on repeat 0; verdict AMBIGUOUS, see 6c; owner decision pending). Everything below comes from the repo, notebook
 outputs and `results/` files unless marked **unverified**.
 
 ## 1. Goal and dataset
@@ -13,7 +13,7 @@ outputs and `results/` files unless marked **unverified**.
 - Label: a user is malicious if listed in `answers/insiders.csv` for release 4.2: 70 insiders
   (scenario 1: 30, scenario 2: 30, scenario 3: 10), 7.0% of users. All 70 appear in the logon log.
 - Only 265 users have device events and 264 have file events; every insider has device activity.
-- **Not in `data/raw/`**: `http.csv` and `email.csv` (verified by listing the folder; only logon, device, file, psychometric, LDAP, answers, readme and license are there). They are in the original archive
+- **Not in `data/raw/` until step 6 (now extracted, see 6b)**: `http.csv` and `email.csv` (at the end of step 5, verified by listing the folder; only logon, device, file, psychometric, LDAP, answers, readme and license were there). They are in the original archive
   `/mnt/c/Users/idree/Desktop/Downloads/r4.2.tar.bz2` (4,824,287,500 bytes on disk; its contents were NOT listed or read). `answers/scenarios.txt` describes scenario 1 as uploading data to wikileaks.org, scenario 2 as surfing
   job websites and soliciting a competitor, scenario 3 as a mass email sent from a supervisor's account (scenarios 1-3 also involve removable drives): web and email activity are named in all three, which motivates option B below.
 
@@ -33,8 +33,10 @@ outputs and `results/` files unless marked **unverified**.
 | `notebooks/02_baseline.ipynb` | user-level baselines on the 5x5 folds (feature sets A and B) |
 | `notebooks/03_weekly_baseline.ipynb` | weekly dataset, baselines, control models, alert budget |
 | `notebooks/04_weekly_baseline_v2.ipynb` | W1-W4 feature sets x LR/RF/XGBoost, budgets, per-scenario results, paired differences |
+| `src/itgnn/commslogs.py` | email/web: streaming `aggregate_http`, `parse_domain`, `match_suffix`, `web_features`, `email_features`, approved category lists, `add_comms_features`, `comms_feature_sets` |
+| `notebooks/06_email_web_probe.ipynb` | step 6: 7 feature sets x RF/XGB, repeat 0, paired differences, alert budget, decision rule |
 | `notebooks/05_gnn_lite.ipynb` | light GraphSAGE vs same network without edges vs RF/XGBoost W2 (pilot, 25 folds, budgets, per scenario, seed check) |
-| `tests/` | 32 tests on synthetic data (smoke, evaluation, extended features, windows, weekly features incl. causality, weekly graph/GNN, alert budget); the alert-budget regression test skips if `results/weekly_v2_oof_scores.parquet` is missing |
+| `tests/` | 40 tests (32 earlier + 8 in `test_commslogs.py`: domain parsing, suffix matching, web/email features incl. causality, streaming, history, feature-set membership) on synthetic data (smoke, evaluation, extended features, windows, weekly features incl. causality, weekly graph/GNN, alert budget); the alert-budget regression test skips if `results/weekly_v2_oof_scores.parquet` is missing |
 
 ## 3. Decisions and reasons
 - **Hybrid layout**: reusable logic in `src/`, notebooks tell the story; keeps logic testable.
@@ -130,6 +132,81 @@ Per scenario (caught at q=0.25%, RF W1 -> W2): s1 11.4 -> 23.0 of 30, s2 22.4 ->
   4. Then test whether simple per-week email/web features (past-only rules as in step 4: week *w* uses data up to *w*) lift RF/XGBoost W2 on the same folds. **Use repeat 0 only (5 folds) for exploration; keep the full 25 folds for the final numbers.** No graph until the tabular features show lift.
 - **Then**: read-only look at `answers/r4.2-*` (per-event labels?) and a label-sensitivity check; ablation of `n_new_pcs` and single history features.
 - **Later (only if the new data justifies it)**: a graph with email/web/device/file structure; error analysis; Neo4j + Streamlit; report; optional r5.2 re-run.
+
+## 6b. Step 6 (option B): email/web probe. PRE-REGISTRATION, written BEFORE any evaluation
+Written 2026-11-24 after extraction and profiling, before any model was fit on email/web features. Nothing below was changed after seeing results; any later deviation is listed under "Deviations" at the end of step 6's results.
+
+**Extraction (done).** One pass `bzip2 -dc < r4.2.tar.bz2 | tar -xv --wildcards '*/email.csv' '*/http.csv'` into `/home/nothing/r42_extract` (outside the repo), tar exit 0, empty `.err`, exactly two regular files, then `mv -n` into `data/raw/` (`email.csv` 1,362,101,939 bytes; `http.csv` 14,536,257,467 bytes). The temp dir was empty afterwards and was deleted. Real rate: about 3.2 MB/s compressed in (~10 MB/s out); the pass took about 24.5 min. bzip2's own exit status was not captured (a truncated archive would have failed tar; all 4.82 GB were read).
+
+**Profile (done, read-only).**
+| | email.csv | http.csv |
+| --- | --- | --- |
+| columns | id, date, user, pc, to, cc, bcc, from, size, attachments, content | id, date, user, pc, url, content |
+| rows | 2,629,979 | 28,434,423 |
+| date range | 2010-01-02 07:11:45 .. 2011-05-16 21:16:26 | 2010-01-02 06:55:16 .. 2011-05-16 21:23:10 |
+| users | 1,000 (all in logon; no logon user missing; 70/70 insiders present) | 1,000 (same) |
+| PCs not in logon | 0 | 0 of 1,000 |
+| duplicate ids / null cells / unparsable URLs | 0 / 0 / n.a. | 0 / n.a. / 0 |
+- Email: sorted by date; `attachments` is an integer count stored as text (0 in 79% of mails); recipients per mail median 2, 99% <= 6, max 17; bcc present in 16%; 62% of `from` addresses are `dtaa.com`, the rest personal webmail; a user has a median of 2 `from` addresses (max 72).
+- Web: 475 distinct domains (`domain` = lowercased host, leading `www.` stripped), 73 weeks, user-week-domain aggregate of 4,026,477 rows (`data/processed/http_user_week_domain.parquet`); only 9 of 475 domains are visited by fewer than 5 users over the whole period. Streamed with pyarrow, `newlines_in_values=True`, content never kept; full pass 98 s, peak memory 3.6 GB. Duplicate-id check uses 64-bit hashes. Row order of `http.csv` was not checked (the aggregate does not depend on it).
+- Rows per user (q25 / median / q75), descriptive: email insiders 489 / 1,796 / 2,515 vs normal 1,002 / 3,013 / 3,712; web insiders 4,932 / 19,608 / 27,442 vs normal 10,034 / 32,871 / 39,444. No zero-row users in either group, so there is no "has any email/web" coverage shortcut. Insiders have fewer rows, which is consistent with the tenure effect (they leave early).
+- Cached: `data/processed/email.parquet` (content dropped), `http_user_week_domain.parquet`, `http_top50_domains.csv`, `http_parts/`.
+
+**Features (all past-only; week w uses events <= w; first-seen and rarity as described).**
+- Email, per user-week: `em_n`, `em_n_after_hours` (hour outside 07-18, same rule as logon), `em_n_recip` (to+cc+bcc entries), `em_n_ext_recip` (recipient domain != dtaa.com), `em_max_recip` (largest single mail), `em_n_bcc` (mails with a bcc), `em_n_attach` (mails with attachments > 0), `em_size_sum`, `em_n_new_recip` (addresses the user never mailed in an earlier week), `em_n_from_external` (sender domain != dtaa.com), `em_n_competitor_recip` (recipients at a competitor domain).
+- **Decision: `em_n_from_external` replaces the planned `em_n_from_mismatch`**, because a user has a median of 2 sender addresses, so a mismatch rule would flag a large share of normal mail. Consequence: scenario 3's "sent as the supervisor" has **no direct feature** (there is no user-to-address map); only `em_max_recip` and `em_size_sum` can carry it.
+- Web, per user-week: `wb_n`, `wb_n_after_hours`, `wb_n_domains`, `wb_n_new_domains`, `wb_share_rare` (share of visits to domains visited by fewer than 5 distinct users before week w; fixed, not tuned; a never-seen domain counts as rare), plus category counts `wb_n_leak`, `wb_n_job`, `wb_n_cloud`, `wb_n_download`, `wb_n_competitor`.
+- Each new column also gets the step-4 history recipe (`hist_mean_*` over the previous 4 active weeks, `dev_*`). Same weekly rows, same warm-up drop as W2 (63,238 rows expected; asserted against the saved W2 scores). Events in weeks with no Logon are dropped and counted; users with no events get 0.
+- **Category lists (approved by the owner; matching is exact domain or `.`-suffix, never substring).** Decided from the unlabeled domain vocabulary and the scenario text, before any insider/label lookup:
+  - leak: `wikileaks.org`
+  - job: `careerbuilder.com`, `indeed.com`, `monster.com`, `simplyhired.com`, `job-hunt.org`, `jobhuntersbible.com`, `taleo.net`
+  - cloud: `dropbox.com`, `mediafire.com`, `yousendit.com`, `4shared.com`, `megaupload.com`, `filesonic.com`, `fileserve.com`
+  - download (keylogger/spy software vendors, judged by name only; no site was opened): `refog.com`, `dailykeylogger.com`, `actualkeylogger.com`, `keylogpc.com`, `spectorsoft.com`, `webwatchernow.com`, `best-spy-soft.com`, `softactivity.com`
+  - competitor (fifth list, added by the owner before any labels were seen; used for web visits `wb_n_competitor` and email recipients `em_n_competitor_recip`): `lockheedmartin.com`, `northropgrumman.com`, `raytheon.com`, `boeing.com`, `harris.com`
+  - **Deliberately out** (deciding on them from labels would be leakage; they may be looked at post-hoc, labelled as such, only after the result is final): `relytec.com`, `wellresearchedreviews.com`, `blackhatworld.com`, `download.cnet.com`, `custhelp.com`. Also out: `linkedin.com`, `craigslist.org`, freelance sites, `amazonaws.com`, `googleusercontent.com`, `filestube.com`, torrent sites.
+  - **Caveat on these lists:** `wikileaks.org` has exactly 30 users and scenario 1 has 30 insiders; the keylogger domains have 1-8 users and scenario 3 has 10 insiders. Overlap with insiders was NOT checked. A scenario-1 gain is therefore expected to be easy in this synthetic dataset.
+
+**Feature sets (repeat 0 only, 5 folds, RF and XGBoost, same fixed hyperparameters as notebook 04, 70 fits).**
+1. W2 (reference, re-run)
+2. W2+E (all email features incl. `em_n_competitor_recip`)
+3. W2+H (all web features incl. the five category counts)
+4. W2+E+H (**primary**)
+5. W2+E+H generic: all email/web features EXCLUDING the named-site features (`wb_n_leak`, `wb_n_job`, `wb_n_cloud`, `wb_n_download`, `wb_n_competitor`, `em_n_competitor_recip`) and their history/deviation columns
+6. W2+E+H no-first-seen: W2+E+H minus `em_n_new_recip`, `wb_n_new_domains`, `wb_share_rare` (and their history/deviation columns)
+7. W2 + calendar week (negative control)
+Metrics: PR-AUC, ROC-AUC, tie-aware precision/recall@100 and the alert budget at q = 0.25/0.5/1/2%, per scenario; paired fold-by-fold difference vs W2 on identical folds. Descriptive burn-in check from the saved predictions (no new fits): PR-AUC restricted to calendar week >= 13, because `wb_share_rare` is unreliable while the domain history is nearly empty. Reproduction check: W2 repeat-0 PR-AUC per fold must match the saved scores in `results/weekly_v2_oof_scores.parquet`.
+
+**Decision rule (fixed before running).** Primary = RF, W2+E+H vs W2, PR-AUC.
+- **GO** (the email/web logs carry signal), all of: (1) RF mean delta PR-AUC >= +0.05; (2) >= 4 of 5 folds positive; (3) XGBoost replicates: mean delta >= +0.03 and >= 4 of 5 folds positive; (4) at q = 0.5% RF W2+E+H catches >= 3 more insiders than RF W2 with <= 2 extra normal users flagged (q = 1% is descriptive); (5) the calendar-week control does not lift (RF delta < +0.01).
+- **AMBIGUOUS**: RF mean delta in [+0.02, +0.05), or only 3 of 5 folds positive, or the RF delta is >= +0.05 but another GO criterion fails. Then no graph yet; ask the owner whether to spend the full 25-fold run.
+- **NO-GO**: RF mean delta < +0.02. Record and move on.
+- **What GO means:** the email/web logs carry signal, NOT that a graph helps. If we get there, graph models must be compared against a tabular model on the SAME features plus the no-edge MLP control.
+- **Interpretation of the generic set** (RF mean delta of "generic" vs W2): if GO holds for W2+E+H but generic is < +0.02, the finding is "named-site features help; generic email/web behaviour does not", and it is NOT a reason to build a graph; the final tabular model gets the named-site features and a GNN is then run on the same features with the no-edge MLP control. If generic ALSO has RF mean delta >= +0.03, that is the case for a relational email/web graph. (0.02-0.03: grey zone, reported without a conclusion.)
+- **Leakage audit:** if W2+E+H PR-AUC exceeds 0.80, audit before believing it, including the per-scenario breakdown, feature importances and the generic ablation (a named-site marker can legitimately explain a large jump). Per-scenario results are reported for every set.
+- After the result is final (not before): a labelled post-hoc check of the overlap between category-domain visitors and insiders, and a look at the five excluded domains.
+- Runtime: if the projected run exceeds ~15 min, stop and ask.
+
+### 6c. Step 6 results (notebook 06, repeat 0 only = 5 folds; fixed notebook-04 hyperparameters; 70 fits in 103 s)
+Rows identical to the saved W2 run (63,238 user-weeks, 322 attack weeks); W2 re-run reproduces the saved repeat-0 scores exactly (PR-AUC diff 0.000 per fold, RF and XGB). Every user-week has email and web activity (coverage 1.000 in both groups; 0 user-weeks with events but no Logon row).
+| PR-AUC (mean ± std over 5 folds) | RF | XGB |
+| --- | --- | --- |
+| W2 | 0.499 ± 0.072 | 0.465 ± 0.097 |
+| W2+E | 0.575 ± 0.122 | 0.566 ± 0.107 |
+| W2+H | 0.772 ± 0.101 | 0.875 ± 0.075 |
+| **W2+E+H (primary)** | **0.743 ± 0.098** | **0.879 ± 0.080** |
+| W2+E+H generic | 0.675 ± 0.127 | 0.824 ± 0.112 |
+| W2+E+H no-first-seen | 0.709 ± 0.094 | 0.877 ± 0.086 |
+| W2+calendar (control) | 0.590 ± 0.105 | 0.565 ± 0.114 |
+Paired difference vs W2 (mean ± std, folds positive): RF W2+E+H +0.244 ± 0.091 (5/5), XGB +0.414 ± 0.126 (5/5); RF W2+H +0.273 (5/5), W2+E +0.076 (4/5); generic RF +0.176 (4/5), XGB +0.359 (5/5); no-first-seen RF +0.210, XGB +0.412; **calendar control RF +0.091 (5/5), XGB +0.100 (5/5)**.
+- **Verdict by the pre-registered rule: AMBIGUOUS.** Criteria 1-4 are met (RF +0.244, 5/5 folds; XGB +0.414, 5/5; q = 0.5% RF catches 58 vs 54 insiders with 6 vs 10 normal users flagged), but **criterion 5 fails**: adding calendar week to W2 lifts RF by +0.091 and XGB by +0.100, far above the +0.01 limit. No graph decision follows from this; the owner decides whether to spend the full 25-fold run.
+- Reading (my interpretation): web features lift well above the calendar effect (RF +0.27, XGB +0.41 vs +0.09 / +0.10); email alone (+0.08 RF, +0.10 XGB) is **not distinguishable from the calendar control**. Why calendar week helps on top of W2 is **unexplained** (hypothesis, unverified: attacks cluster in time).
+- The notebook prints "case for a relational graph" for generic RF +0.176 vs the +0.03 rule; that line is mechanical. The rule applies only if GO holds, which it does not, so it is not a conclusion. Generic XGB is clearly above the calendar control; generic RF only moderately.
+- W2+E+H RF PR-AUC 0.743 < 0.80: the leakage-audit trigger did not fire. Burn-in check (calendar week >= 13) leaves every attack week (322 of 322) in, so it removes only quiet weeks and changes the deltas little (RF W2+E+H -W2 +0.216, XGB +0.379). `wb_share_rare` prints 0.000 in every calendar-week block (3 decimals; not checked whether exactly constant), so it is practically unused.
+- Alert budget (one repeat; caught of 70 / normal flagged of 930): RF W2 q=0.25% 49/3, 0.5% 54/10, 1% 60/19, 2% 65/41; RF W2+E+H 41/2, 58/6, 66/20, 70/67. Mixed for RF: worse at q = 0.25% (41 vs 49 caught), better at 0.5-2% in insiders caught, but more normal users flagged at 2% (67 vs 41). XGB W2+E+H: 56/0, 62/7, 68/27, 69/51 vs XGB W2 51/2, 53/5, 58/12, 62/36.
+- Per scenario (caught at q = 1%, of 30/30/10): RF W2 28/26/6 -> W2+E+H 30/29/7; XGB W2 27/27/4 -> W2+E+H 30/30/8 (full tables for every set and budget are in the notebook). The scenario-1 gain is expected to be easy (`wikileaks.org` has exactly 30 users, scenario 1 has 30 insiders; 30 users and 52 user-weeks visit it in the model rows). Scenario 3 has only 10 insiders.
+- Descriptive RF impurity importances (fit on fold-0 training users; biased towards continuous columns): top are W2 device/file columns; named-site columns hold 19.8% of total importance (`hist_mean_wb_n_competitor` 6th at 0.046).
+- Category coverage in the model rows: wikileaks 30 users / 52 user-weeks, job 902 users, cloud 849, download 9 users / 9 user-weeks, competitor web 513, competitor email recipients 999. Overlap with insiders NOT checked (post-hoc, after the result is final).
+- Not run: 25 folds, post-hoc overlap analysis, the five excluded domains, any chart (notebook 06 has tables only). Deviations from the plan: none after the pre-registration. Charts: none.
 
 ## 7. Open questions for the owner
 - Per-week alert budget: what review capacity is realistic (weeks or users per week)?
