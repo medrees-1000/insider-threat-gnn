@@ -334,6 +334,8 @@ def page_investigate():
         vt = U.week_vs_usual(fx.loc[(user, pick)])
         sty = vt.style.format({"This week": "{:g}", "Their usual": "{:.1f}"}).map(lambda v: f"color: {PAL['risk'][3]}; font-weight: 700" if str(v).startswith("▲") else "", subset=["Compared with usual"])
         st.dataframe(sty, hide_index=True, width="stretch", height=35 * (len(vt) + 1) + 3)
+        ns = U.named_sites_visited(source.neighbourhood(user, pick))
+        st.markdown("**Named sites visited that week:** " + ("; ".join(f"{r.Site} ({r.Category}) × {r.Visits:g}" for r in ns.itertuples()) if len(ns) else "none"))
         howto("each row sets this week's count beside the person's own average over their earlier weeks, and a red marker means at least double and at least 3 more than usual.",
               help="'Their usual' is the average of the same count over the weeks before this one (never including this week or later ones). ↑ means above by more than a quarter; the table uses existing features only.")
     st.subheader(f"Why the week of {pick:%Y-%m-%d} scored as it did")
@@ -405,9 +407,9 @@ def page_whatif():
                 st.caption("Risk rating of this week (final model)")
                 st.markdown(f"#### Riskier than {pct:.2f}% of real weeks")
                 if v is not None:
-                    st.success(f"Would be an alert at the {v:g}% budget (score {score:.4f}).")
+                    st.success(f"Would be an alert at the {v:g}% budget.")
                 else:
-                    st.info(f"Would not be an alert at any budget up to 2% (score {score:.4f}).")
+                    st.info("Would not be an alert at any budget up to 2%.")
                 a, b = st.columns(2)
                 a.metric("All features: riskier than", f"{pct:.1f}%", help=f"Score {score:.4f}.")
                 b.metric("No named sites: riskier than", f"{pct_g:.1f}%", help=f"The same rating without the named-site features (score {score_g:.4f}).")
@@ -437,7 +439,7 @@ def page_whatif():
     long = pd.concat([df.assign(series="All features", y=df["z"]), df.assign(series="No named sites", y=df["z_g"])])
     colour = alt.Color("series:N", scale=alt.Scale(domain=["All features", "No named sites"], range=[PAL["accent"], PAL["muted"]]), legend=alt.Legend(title=None, orient="top", labelLimit=300))
     ysc = alt.Scale(domain=[lo, hi], nice=False)
-    line = alt.Chart(long).mark_line(strokeWidth=2, interpolate="step-after").encode(x=alt.X("value:Q", title=W.LABELS[knob]), y=alt.Y("y:Q", scale=ysc, title="Risk score (log-odds: higher = riskier)"), color=colour, tooltip=["series", "value", "y"])
+    line = alt.Chart(long).mark_line(strokeWidth=2, interpolate="step-after").encode(x=alt.X("value:Q", title=W.LABELS[knob], axis=alt.Axis(tickMinStep=1, format="d")), y=alt.Y("y:Q", scale=ysc, title="Risk score (log-odds: higher = riskier)"), color=colour, tooltip=["series", "value", "y"])
     rules = alt.Chart(cuts).mark_rule(strokeDash=[4, 4], color=PAL["text2"]).encode(y=alt.Y("z:Q", scale=ysc))
     xmax = float(df["value"].max())
     names_ = alt.Chart(cuts.assign(x=xmax)).mark_text(align="right", baseline="bottom", dx=-4, dy=-2, color=PAL["text"], fontSize=11).encode(x="x:Q", y=alt.Y("z:Q", scale=ysc), text="label:N")

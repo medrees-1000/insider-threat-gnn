@@ -106,7 +106,16 @@ def test_usual_marker_and_week_vs_usual():
     row["n_file"] = 9.0
     t = U.week_vs_usual(row)
     assert list(t["Activity"]) == [lab for _, lab in U.USUAL_ROWS] and t.set_index("Activity").loc["Files copied to removable media", "Compared with usual"] == "▲ far above usual"
-    assert (t["Compared with usual"] == "about usual").sum() == 6
+    assert (t["Compared with usual"] == "about usual").sum() == len(U.USUAL_ROWS) - 1 and len(t) == 8
+    assert t.iloc[-1]["Activity"].startswith("Named-site visits")
+
+
+def test_named_sites_visited_lists_only_named_visits_with_counts():
+    n = pd.DataFrame({"edge_type": ["VISITED", "VISITED", "VISITED", "LOGGED_ON", "EMAILED"], "other_id": ["wikileaks.org", "bbc.com", "taleo.net", "PC-1", "X"],
+                      "other_kind": ["Domain", "Domain", "Domain", "PC", "User"], "weight": [4.0, 9.0, 2.0, 3.0, 1.0], "category": ["leak", "", "job", "", ""], "other_users": [0] * 5})
+    t = U.named_sites_visited(n)
+    assert list(t["Site"]) == ["wikileaks.org", "taleo.net"] and list(t["Visits"]) == [4.0, 2.0] and list(t["Category"]) == ["leak site", "job site"]
+    assert U.named_sites_visited(n.iloc[:0]).empty
 
 
 def test_one_label_map_for_contribution_groups():

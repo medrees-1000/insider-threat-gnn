@@ -285,7 +285,7 @@ def export_model(cfg, out_dir="results", log=print):
     return meta
 
 
-WEEK_FACT_COLS = ["n_logon", "n_after_hours", "n_device", "n_file", "em_n", "em_n_ext_recip", "wb_n"]
+WEEK_FACT_COLS = ["n_logon", "n_after_hours", "n_device", "n_file", "em_n", "em_n_ext_recip", "wb_n", "wb_n_named"]   # wb_n_named = leak + job + cloud + keylogger + competitor visits
 
 
 def export_week_facts(cfg, out_dir="results", log=print):
@@ -295,6 +295,9 @@ def export_week_facts(cfg, out_dir="results", log=print):
     d = prepare(cfg)
     windows = load_attack_windows(cfg["raw_dir"])
     weekly = drop_warmup(load_full(d, windows)).reset_index(drop=True)
+    from itgnn.whatif import CATEGORY_COUNTS
+    weekly["wb_n_named"] = weekly[CATEGORY_COUNTS].sum(axis=1)                                   # the mean of a sum is the sum of the means
+    weekly["hist_mean_wb_n_named"] = weekly[[f"hist_mean_{c}" for c in CATEGORY_COUNTS]].sum(axis=1)
     cols = WEEK_FACT_COLS + [f"hist_mean_{c}" for c in WEEK_FACT_COLS]
     out = weekly[["user", "week_start"] + cols].copy()
     out[cols] = out[cols].astype("float32")

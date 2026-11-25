@@ -120,7 +120,7 @@ def test_alerts_one_row_per_person_show_more_and_investigate_table(ui_results_fu
     _go(at, "Investigate")
     assert any("compared with" in s.value for s in at.subheader)
     tbl = [d for d in at.dataframe if "Compared with usual" in d.value.columns][0].value
-    assert len(tbl) == 7 and "Their usual" in tbl.columns
+    assert len(tbl) == 8 and "Their usual" in tbl.columns and any("Named sites visited that week" in m.value for m in at.markdown)
     assert sum("How to read this" in c.value for c in at.caption) >= 3
     assert len(at.metric) == 2                                                                  # alert level + without-named-sites only; no duplicate percentile card
 
@@ -152,4 +152,5 @@ def test_whatif_pins_the_rating_caps_sliders_and_reads_out_the_flip(ui_results_f
     assert "biggest effect" in sweep.options[0]                                  # the sweep starts at the knob with the largest effect
     text = " ".join(m.value for m in at.markdown)
     assert "What would it take?" in text
+    assert "(score" not in " ".join(s.value for s in at.success) + " ".join(i.value for i in at.info)      # no raw score in the verdict line
     assert sum("How to read this" in c.value for c in at.caption) >= 2          # contribution chart and sweep chart (the readout sentence keeps its explanation in a tooltip)

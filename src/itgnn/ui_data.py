@@ -214,7 +214,9 @@ def alerts_by_person(alerts):
 
 
 USUAL_ROWS = [("n_logon", "Logons"), ("n_after_hours", "Logons outside 07:00-18:00"), ("n_device", "Removable-drive connections"), ("n_file", "Files copied to removable media"),
-              ("em_n", "Emails sent"), ("em_n_ext_recip", "Recipients outside the company"), ("wb_n", "Web pages visited")]
+              ("em_n", "Emails sent"), ("em_n_ext_recip", "Recipients outside the company"), ("wb_n", "Web pages visited"),
+              ("wb_n_named", "Named-site visits (leak, job, cloud, keylogger, competitor)")]
+NAMED_CATEGORY = {"leak": "leak site", "download": "keylogger site", "job": "job site", "cloud": "cloud storage", "competitor": "competitor"}
 
 
 def usual_marker(value, usual):
@@ -227,6 +229,13 @@ def usual_marker(value, usual):
     if -d >= 1 and value < 0.75 * usual:
         return "↓ below usual"
     return "about usual"
+
+
+def named_sites_visited(neigh):
+    """The named sites (leak, job, cloud, keylogger, competitor) a person visited in one week, with visit counts, from the neighbourhood edge frame."""
+    e = neigh[(neigh["edge_type"] == "VISITED") & neigh["category"].isin(NAMED_CATEGORY)]
+    t = pd.DataFrame({"Site": e["other_id"], "Category": e["category"].map(NAMED_CATEGORY), "Visits": e["weight"].astype(float)})
+    return t.sort_values(["Visits", "Site"], ascending=[False, True]).reset_index(drop=True)
 
 
 def week_vs_usual(facts_row):
