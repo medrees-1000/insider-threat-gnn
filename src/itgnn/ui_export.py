@@ -285,6 +285,25 @@ def export_model(cfg, out_dir="results", log=print):
     return meta
 
 
+WEEK_FACT_COLS = ["n_logon", "n_after_hours", "n_device", "n_file", "em_n", "em_n_ext_recip", "wb_n"]
+
+
+def export_week_facts(cfg, out_dir="results", log=print):
+    """ui_week_facts.parquet: for every scored user-week, seven plain activity counts and the person's own past-only average of each (hist_mean_*),
+    for the Investigate 'this week vs their usual' table. Existing feature values only; no labels, no scores."""
+    t0 = time.time()
+    d = prepare(cfg)
+    windows = load_attack_windows(cfg["raw_dir"])
+    weekly = drop_warmup(load_full(d, windows)).reset_index(drop=True)
+    cols = WEEK_FACT_COLS + [f"hist_mean_{c}" for c in WEEK_FACT_COLS]
+    out = weekly[["user", "week_start"] + cols].copy()
+    out[cols] = out[cols].astype("float32")
+    assert out[cols].notna().all().all() and not any("label" in c for c in out.columns)
+    out.to_parquet(Path(out_dir) / "ui_week_facts.parquet", index=False)
+    log(json.dumps({"seconds": round(time.time() - t0, 1), "rows": len(out), "mb": round((Path(out_dir) / "ui_week_facts.parquet").stat().st_size / 2**20, 2)}))
+    return out
+
+
 def export_curve(cfg, out_dir="results", log=print):
     """ui_budget_curve.json: insiders caught and normal users flagged (mean and sd over the 5 repeats of the 5x5 user-split CV) for W2, generic and
     W2+E+H on a grid of alert budgets. Same alert_budget function and seeds as ui_metrics.json, so the shared budgets agree."""
@@ -477,7 +496,7 @@ def export_metrics(cfg, out_dir="results", log=print):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("stage", choices=["caches", "scores", "edges", "metrics", "model", "curve", "facts", "all"])
+    ap.add_argument("stage", choices=["caches", "scores", "edges", "metrics", "model", "curve", "facts", "weekfacts", "all"])
     ap.add_argument("--config", default="configs/config.yaml")
     a = ap.parse_args(argv)
     cfg = load_config(a.config)
@@ -495,6 +514,8 @@ def main(argv=None):
         export_curve(cfg, cfg["results_dir"])
     if a.stage in ("facts", "all"):
         export_facts(cfg, cfg["results_dir"])
+    if a.stage in ("weekfacts", "all"):
+        export_week_facts(cfg, cfg["results_dir"])
 
 
 if __name__ == "__main__":

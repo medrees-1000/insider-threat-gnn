@@ -72,16 +72,43 @@ def test_ui_modules_do_not_train_or_write():
                     assert not any(set(str(m)) & set("wax+") for m in mode), (f, mode)
 
 
-def test_percentiles_alert_frame_and_reasons(ui_results):
+def test_percentiles_alert_tables_and_reasons(ui_results):
     sp = U.with_percentiles(U.load_scores(ui_results))
     assert sp["pct"].between(0, 100).all() and sp["pct"].iloc[sp["score"].argmax()] == 100 and sp["pct"].iloc[sp["score"].argmin()] < 5
     assert (np.sign(sp["z"].diff().fillna(0)) == np.sign(sp["score"].diff().fillna(0))).mean() > 0.9     # log-odds order follows the score
     top = U.rank_alerts(sp, 25)
-    for display, col in (("Percentile", "pct"), ("Log-odds", "z"), ("Raw score", "score")):
-        t = U.alerts_frame(top, display)
-        assert list(t.columns) == ["Person", "Week", "Risk", "Without named sites", "Why"] and len(t) == len(top)
-        assert np.allclose(t["Risk"], top[col].round(4 if display == "Raw score" else 2))
-    assert "Spread over 5 repeats" in U.alerts_frame(top, "Percentile", show_sd=True).columns
-    why = U.alerts_frame(top)["Why"].iloc[0]
+    t = U.alerts_by_week(top)
+    assert list(t.columns) == ["Rank", "Person", "Week", "Risk", "Position", "Why", "Needs named sites"] and len(t) == len(top)
+    assert list(t["Rank"]) == list(range(1, len(top) + 1)) and np.allclose(t["Risk"], top["z"].round(2))
+    assert t["Position"].iloc[0].startswith("top ") and "Spread over 5 repeats" in U.alerts_by_week(top, show_sd=True).columns
+    why = t["Why"].iloc[0]
     assert 1 <= len(why) <= 2 and all(isinstance(x, str) for x in why)
-    assert not any("label" in c.lower() or "truth" in c.lower() for c in U.alerts_frame(top).columns)      # the default table carries no label columns
+    assert not any("label" in c.lower() or "truth" in c.lower() for c in t.columns)      # the default table carries no label columns
+
+
+def test_alerts_by_person_one_row_per_person_with_worst_week(ui_results):
+    sp = U.with_percentiles(U.load_scores(ui_results))
+    top = U.rank_alerts(sp, 50)
+    p = U.alerts_by_person(top)
+    assert p["Person"].is_unique and set(p["Person"]) == set(top["user"]) and list(p["Rank"]) == list(range(1, len(p) + 1))
+    for _, r in p.iterrows():
+        mine = top[top["user"] == r["Person"]]
+        worst = mine.sort_values(["score", "week_start"], ascending=[False, True]).iloc[0]
+        assert r["Flagged weeks"] == len(mine) and r["Worst week"] == worst["week_start"]
+        assert r["Risk"] == round(float(mine["z"].max()), 2)
+    assert (p["Risk"].diff().dropna() <= 1e-9).all()     # ranked by worst week
+
+
+def test_usual_marker_and_week_vs_usual():
+    assert U.usual_marker(10, 2) == "▲ far above usual" and U.usual_marker(3.5, 3) == "about usual" and U.usual_marker(4, 3) == "↑ above usual"
+    assert U.usual_marker(0, 5) == "↓ below usual" and U.usual_marker(1, 0) == "↑ above usual" and U.usual_marker(3, 0) == "▲ far above usual"
+    row = {**{k: 1.0 for k, _ in U.USUAL_ROWS}, **{f"hist_mean_{k}": 1.0 for k, _ in U.USUAL_ROWS}}
+    row["n_file"] = 9.0
+    t = U.week_vs_usual(row)
+    assert list(t["Activity"]) == [lab for _, lab in U.USUAL_ROWS] and t.set_index("Activity").loc["Files copied to removable media", "Compared with usual"] == "▲ far above usual"
+    assert (t["Compared with usual"] == "about usual").sum() == 6
+
+
+def test_one_label_map_for_contribution_groups():
+    assert list(U.GROUP_COLS.values()) == [U.GROUP_SHORT[c] for c in U.GROUP_COLS] and len(set(U.GROUP_COLS.values())) == 9
+    assert not any(x in " ".join(U.GROUP_COLS.values()) for x in ("W2", "first-seen", "category domains"))

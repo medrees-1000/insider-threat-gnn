@@ -50,7 +50,13 @@ def app_url():
 def browser(app_url):
     b = cdp.Browser(width=1500, height=900)
     b.goto(app_url, "Finding insiders from everyday activity", 120); time.sleep(2)
-    b.click_text("Threat map"); assert b.wait("Flagged user-weeks", 90); time.sleep(3)
+    b.click_text("Threat map")
+    for _ in range(90):                      # the map has mounted once Cytoscape has drawn nodes
+        if b.eval("!!(window.__tmDebug && window.__tmDebug.nodes > 0)"): break
+        time.sleep(1)
+    else:
+        pytest.fail("the Threat map did not draw")
+    time.sleep(2)
     yield b
     b.close()
 
@@ -58,7 +64,7 @@ def browser(app_url):
 # The node's REAL client position is computed from a fresh getBoundingClientRect, never from Cytoscape's cache.
 _PICK = """(() => { const d = window.__tmDebug, cy = d.cy, r = d.root.querySelector('.canvas').getBoundingClientRect();
   const all = cy.nodes().toArray().map((n) => ({ id: n.id(), user: n.hasClass('user'), x: r.left + n.renderedPosition().x, y: r.top + n.renderedPosition().y, s: n.renderedWidth() }));
-  const ok = all.filter((u) => u.user && u.x > r.left + 30 && u.x < r.right - 30 && u.y > r.top + 30 && u.y < Math.min(r.bottom, innerHeight) - 30);
+  const ok = all.filter((u) => u.user && u.x > r.left + 30 && u.x < r.right - 30 && u.y > Math.max(r.top + 30, 90) && u.y < Math.min(r.bottom, innerHeight) - 30);
   const clear = ok.filter((u) => all.every((o) => o.id === u.id || Math.hypot(o.x - u.x, o.y - u.y) > 34));
   const c = (clear.length ? clear : ok).sort((a, b) => b.s - a.s)[0];
   const bb = cy.renderer().containerBB;

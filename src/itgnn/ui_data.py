@@ -6,10 +6,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-GROUP_COLS = {  # parquet column -> label shown to the analyst
-    "w2_base": "W2 base counts", "w2_hist_dev": "W2 history/deviation", "email_volume": "email volume",
-    "email_recipients": "email recipients/attachments", "web_volume": "web volume", "web_domains": "web domain counts",
-    "web_after_hours": "web after-hours", "named_site": "named-site (category domains)", "first_seen": "first-seen"}
+GROUP_COLS = {  # parquet column -> the ONE plain-English label used for the contribution groups on every page (bars, reasons, map panel)
+    "w2_base": "everyday activity", "w2_hist_dev": "change from their usual", "email_volume": "email volume", "email_recipients": "who they emailed",
+    "web_volume": "web browsing", "web_domains": "variety of sites", "web_after_hours": "after-hours browsing", "named_site": "named-site visits", "first_seen": "new things"}
 BUDGETS = [0.25, 0.5, 1.0, 2.0]
 CATEGORY_NOTE = "Named-site category (also an XGBoost feature; evidence for the analyst)"
 EDGE_COLS = ["edge_type", "other_id", "other_kind", "weight", "category", "other_users"]
@@ -165,9 +164,7 @@ def assert_aggregates_only(obj, path="$", max_list=64):
         raise AssertionError(f"{path}: looks like a user id ({obj})")
 
 
-GROUP_SHORT = {"w2_base": "everyday activity", "w2_hist_dev": "change from their usual", "email_volume": "email volume", "email_recipients": "who they emailed",
-               "web_volume": "web browsing", "web_domains": "variety of sites", "web_after_hours": "after-hours browsing", "named_site": "named-site visits", "first_seen": "new things"}
-DISPLAYS = ["Percentile", "Log-odds", "Raw score"]
+GROUP_SHORT = GROUP_COLS   # old name, same map
 
 
 def with_percentiles(scores):
@@ -186,11 +183,53 @@ def reasons(row, k=2):
     return [f"{n} +{v:.1f}" for n, v in top if v > 0] or ["nothing stands out"]
 
 
-def alerts_frame(alerts, display="Percentile", show_sd=False):
-    """Compact alert table: person, week, the chosen risk display (+ the no-named-site version), the top two reasons, optional spread."""
-    col, colg = {"Percentile": ("pct", "pct_g"), "Log-odds": ("z", "z_g"), "Raw score": ("score", "score_generic")}[display]
-    t = pd.DataFrame({"Person": alerts["user"], "Week": alerts["week_start"], "Risk": alerts[col].round(4 if display == "Raw score" else 2),
-                      "Without named sites": alerts[colg].round(4 if display == "Raw score" else 2), "Why": [reasons(r) for _, r in alerts.iterrows()]})
+def top_label(pct):
+    """'top 0.034%' from a percentile (0-100, share of weeks that score lower)."""
+    return f"top {max(100 - float(pct), 0.0001):.2g}%"
+
+
+def _alert_cols(a, floor):
+    return {"Position": [top_label(p) for p in a["pct"]], "Why": [reasons(r) for _, r in a.iterrows()],
+            "Needs named sites": ["yes" if g < floor else "" for g in a["pct_g"]]}   # would not rank in the same top-q without the named-site features
+
+
+def alerts_by_week(alerts, show_sd=False):
+    """One row per alerted week: rank, person, week, risk (log-odds), position among all weeks, main reasons, optional spread."""
+    floor = alerts["pct"].min()
+    c = _alert_cols(alerts, floor)
+    t = pd.DataFrame({"Rank": np.arange(1, len(alerts) + 1), "Person": alerts["user"].to_numpy(), "Week": alerts["week_start"].to_numpy(), "Risk": alerts["z"].round(2).to_numpy(), **c})
     if show_sd:
-        t["Spread over 5 repeats"] = alerts["score_sd"].round(4)
+        t["Spread over 5 repeats"] = alerts["score_sd"].round(4).to_numpy()
     return t
+
+
+def alerts_by_person(alerts):
+    """One row per person: number of flagged weeks, their worst week (highest score) with its risk, position and main reasons. Rank follows the worst week."""
+    floor = alerts["pct"].min()
+    a = alerts.sort_values(["score", "user", "week_start"], ascending=[False, True, True])
+    n = a.groupby("user").size()
+    w = a.drop_duplicates("user").reset_index(drop=True)
+    c = _alert_cols(w, floor)
+    return pd.DataFrame({"Rank": np.arange(1, len(w) + 1), "Person": w["user"], "Flagged weeks": n[w["user"]].to_numpy(), "Worst week": w["week_start"], "Risk": w["z"].round(2), **c})
+
+
+USUAL_ROWS = [("n_logon", "Logons"), ("n_after_hours", "Logons outside 07:00-18:00"), ("n_device", "Removable-drive connections"), ("n_file", "Files copied to removable media"),
+              ("em_n", "Emails sent"), ("em_n_ext_recip", "Recipients outside the company"), ("wb_n", "Web pages visited")]
+
+
+def usual_marker(value, usual):
+    """Plain comparison with the person's own usual (past-only average): far above = at least double and at least 3 more."""
+    d = value - usual
+    if d >= 3 and value >= 2 * usual:
+        return "▲ far above usual"
+    if d >= 1 and value > 1.25 * usual:
+        return "↑ above usual"
+    if -d >= 1 and value < 0.75 * usual:
+        return "↓ below usual"
+    return "about usual"
+
+
+def week_vs_usual(facts_row):
+    """'This week vs their usual' table from one ui_week_facts row (current count and the person's past-only mean)."""
+    rows = [{"Activity": label, "This week": float(facts_row[k]), "Their usual": float(facts_row[f"hist_mean_{k}"]), "Compared with usual": usual_marker(float(facts_row[k]), float(facts_row[f"hist_mean_{k}"]))} for k, label in USUAL_ROWS]
+    return pd.DataFrame(rows)

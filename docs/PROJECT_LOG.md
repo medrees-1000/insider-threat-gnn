@@ -368,6 +368,12 @@ Decisions (owner): programmatic `st.tabs(key="nav")` if the spike confirms it, e
 - **Hover:** hovered node, its edges and direct neighbours get a soft highlight (border/edge opacity), cleared on mouse-out and when the pointer leaves the canvas; no dimming, no layout re-run (node positions identical after hovering). Tooltip adds the top positive reason (people; campaign view uses the best week) or a short description (websites, PCs, contacts).
 - Frame rates are from headless Chromium with software rendering; a real GPU browser may differ.
 
+## 6n. Design review fixes (nothing committed; no model, score, metric, label rule or existing saved result changed)
+- **New results file (label-free, no scores):** `results/ui_week_facts.parquet` (`python -m itgnn.ui_export weekfacts`, also part of `all`): for every scored user-week, seven activity counts and the person's own past-only average of each (63,238 rows, 0.5 MB). Feeds Investigate's "this week compared with usual" table; the page shows a note if the file is missing.
+- What-if: rating card, notes and contribution bars are one sticky block (max height = screen, scrolls inside only if a screen is too short). Alerts: default is one row per person (rank, flagged weeks, worst week, log-odds bar from the budget cut-off to the maximum, "top x%" rarity, reasons, a "needs named sites" marker), a toggle gives one row per week; 25 rows with "show more", table at full height so the page wheel-scrolls normally.
+- No delta arrows on any metric card; one label map (`ui_data.GROUP_COLS`) for the contribution groups everywhere including the map panel; sidebar removed (budget on Alerts and What-if, calendar week on Alerts, evaluation switch in an Advanced expander at the foot of Alerts/Investigate/Threat map, backend note in the footer); the weekly-queue caveat now only on the Overview card and in Limitations; "How to read this" is one sentence with the rest in a tooltip; Overview chart zoomed to 0-30 normal users flagged; Rigor bar renamed "Baseline + week of the year (timing-only control)"; Investigate lost the duplicate percentile card.
+- Browser regression test (`ITGNN_BROWSER=1 pytest tests/browser`) now waits for the map to draw and avoids nodes under Streamlit's fixed header.
+
 ## 7. Open questions for the owner
 - Per-week alert budget: what review capacity is realistic (weeks or users per week)?
 - (Decided in step 4) New users: skip their first 4 active weeks for every model.

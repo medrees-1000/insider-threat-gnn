@@ -43,9 +43,9 @@ def test_default_path_never_loads_the_label_file(ui_results_full, monkeypatch):
         _go(at, page)
     for page in ("Alerts", "Threat map"):                 # the evaluation view is the ONLY thing that may load them
         _go(at, page)
-        at.sidebar.checkbox[0].check().run()
+        at.checkbox(key="w_eval").check().run()            # lives in the Advanced expander at the foot of the page
         assert at.exception and "ground-truth labels were loaded" in str(at.exception[0].value), page
-        at.sidebar.checkbox[0].uncheck()
+        at.session_state["_eval"] = False; at.session_state["w_eval"] = False; at.run()       # the failed run never reached the footer checkbox, so switch the flag off directly
 
 
 def test_controls_and_evaluation_view(ui_results_full, monkeypatch):
@@ -53,12 +53,13 @@ def test_controls_and_evaluation_view(ui_results_full, monkeypatch):
     _go(at, "Alerts")
     assert len(at.dataframe[0].value) == 1               # 0.5% of 24 weeks -> 1 alert
     assert not any("truth" in c for c in at.dataframe[0].value.columns)
-    at.sidebar.radio[0].set_value(2.0).run()
+    assert len(at.sidebar.radio) == 0 and len(at.sidebar.selectbox) == 0 and len(at.sidebar.checkbox) == 0      # no sidebar controls: the budget and the week are on the page
+    at.radio(key="q_al").set_value(2.0).run()
     assert not at.exception and "Top 2.0%" in at.subheader[0].value
-    at.sidebar.selectbox[0].select(22).run()
+    at.selectbox(key="al_wk").select(22).run()
     assert not at.exception and "calendar week 22" in at.subheader[0].value
-    at.sidebar.selectbox[0].select("All weeks (global ranking)").run()
-    at.sidebar.checkbox[0].check().run()
+    at.selectbox(key="al_wk").select("All weeks (global ranking)").run()
+    at.checkbox(key="w_eval").check().run()
     assert not at.exception and {"Attack week (truth)", "Scenario (truth)"} <= set(at.dataframe[0].value.columns)
     assert any("EVALUATION VIEW" in e.value for e in at.error)
     _go(at, "Threat map")                                 # the map payload carries insider flags only now
@@ -88,13 +89,14 @@ def test_overview_numbers_come_from_the_files_and_whatif_responds(ui_results_ful
     assert not at.exception and any("65.0 of 70" in m.value for m in at.metric)
     _go(at, "What-if")
     assert len(at.slider) == 12 and any("Riskier than" in m.value for m in at.markdown)
-    before = at.metric[0].delta
+    before = at.metric[0].help      # carries the score, which responds even where the percentile rounds to the same value
     at.slider[1].set_value(20).run()                                                           # n_after_hours: the rating must respond live
     assert not at.exception
-    assert at.metric[0].delta != before, "the rating did not respond to the slider"
+    assert at.metric[0].help != before, "the rating did not respond to the slider"
     at.button[0].click().run()                                                                  # a preset button
     assert not at.exception
     assert sum("How to read this" in c.value for c in at.caption) >= 2                        # contribution chart + sweep chart
+    assert not any(m.delta for m in at.metric)
 
 
 def test_label_file_is_never_read_by_the_overview_or_whatif(ui_results_full, monkeypatch):
@@ -105,18 +107,36 @@ def test_label_file_is_never_read_by_the_overview_or_whatif(ui_results_full, mon
         _go(at, page)
 
 
-def test_alerts_display_options_and_investigate_chart(ui_results_full, monkeypatch):
+def test_alerts_one_row_per_person_show_more_and_investigate_table(ui_results_full, monkeypatch):
     at = _app(ui_results_full, monkeypatch).run()
     _go(at, "Alerts")
-    assert at.radio(key="al_display").value == "Percentile"                     # percentile is the default display
-    pct = at.dataframe[0].value["Risk"].iloc[0]
-    assert 0 <= pct <= 100
-    for disp in ("Log-odds", "Raw score"):
-        at.radio(key="al_display").set_value(disp).run()
-        assert not at.exception, disp
-    assert any("How to read this" in c.value for c in at.caption)
+    at.radio(key="q_al").set_value(2.0).run()
+    t = at.dataframe[0].value
+    assert list(t.columns[:3]) == ["Rank", "Person", "Flagged weeks"] and t["Person"].is_unique   # default: one row per person
+    assert "Risk" in t.columns and not any("percentile" in c.lower() for c in t.columns)
+    at.toggle(key="al_per_week").set_value(True).run()
+    assert not at.exception and "Week" in at.dataframe[0].value.columns and "Flagged weeks" not in at.dataframe[0].value.columns
+    assert sum("How to read this" in c.value for c in at.caption) == 1 and all(c.value.count(".") <= 2 for c in at.caption if "How to read this" in c.value)
     _go(at, "Investigate")
-    assert any("How to read this" in c.value for c in at.caption) and sum("How to read this" in c.value for c in at.caption) >= 2
+    assert any("compared with" in s.value for s in at.subheader)
+    tbl = [d for d in at.dataframe if "Compared with usual" in d.value.columns][0].value
+    assert len(tbl) == 7 and "Their usual" in tbl.columns
+    assert sum("How to read this" in c.value for c in at.caption) >= 3
+    assert len(at.metric) == 2                                                                  # alert level + without-named-sites only; no duplicate percentile card
+
+
+def test_one_budget_control_per_page_and_no_caveat_repeats(ui_results_full, monkeypatch):
+    at = _app(ui_results_full, monkeypatch).run()
+    assert len(at.sidebar.radio) == 0 and len(at.sidebar.checkbox) == 0               # Overview has no sidebar controls at all
+    for page, n in (("Overview", 0), ("Alerts", 1), ("Investigate", 0), ("What-if", 1), ("Rigor and limits", 0)):
+        _go(at, page)
+        assert len([r for r in at.radio if r.label.startswith("Alert budget")]) == n, page
+    alerts_text = " ".join(c.value for c in at.caption)
+    _go(at, "Alerts")
+    assert "easier than" not in " ".join(c.value for c in at.caption)
+    _go(at, "Rigor and limits")
+    text = " ".join(m.value for m in at.markdown) + " ".join(c.value for c in at.caption)
+    assert text.count("easier than a real weekly queue") <= 1
 
 
 def test_whatif_pins_the_rating_caps_sliders_and_reads_out_the_flip(ui_results_full, monkeypatch):
@@ -132,4 +152,4 @@ def test_whatif_pins_the_rating_caps_sliders_and_reads_out_the_flip(ui_results_f
     assert "biggest effect" in sweep.options[0]                                  # the sweep starts at the knob with the largest effect
     text = " ".join(m.value for m in at.markdown)
     assert "What would it take?" in text
-    assert sum("How to read this" in c.value for c in at.caption) >= 3          # contribution chart, sweep chart, readout
+    assert sum("How to read this" in c.value for c in at.caption) >= 2          # contribution chart and sweep chart (the readout sentence keeps its explanation in a tooltip)

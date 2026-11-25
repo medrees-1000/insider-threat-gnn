@@ -25,7 +25,7 @@ no-edge and shuffled-edge controls added nothing, so the model is a plain gradie
 5. **What-if** - press *Leak-site visit* (or move any slider) and watch the pinned rating respond; open *Sweep one behaviour* to see where the verdict would flip.
 6. **Rigor and limits** - the checks behind the numbers (leak caught in the first baseline, 5x5 user-split CV, causality check, time-based test, graph controls) and what this does *not* show.
 
-Optional: tick *Evaluation view* in the sidebar to see ground-truth labels and attack windows (off by default; analysts never see them).
+Optional: open *Advanced* at the foot of the Alerts, Investigate or Threat map page and tick *Evaluation view* to see ground-truth labels and attack windows (off by default; analysts never see them).
 
 ### Screenshots to save (exact names under `docs/screenshots/`)
 
@@ -103,7 +103,7 @@ No label, scenario or attack window is ever written to Neo4j. Neo4j Browser: htt
 ```bash
 streamlit run app/streamlit_app.py   # open http://localhost:8501 (also from a Windows browser when run inside WSL2)
 ```
-Pages: Overview, Threat map (interactive Cytoscape.js graph), Alerts, Investigate, What-if (live scorer from the saved final models), Rigor and limits. The **evaluation view** (sidebar, off by default) is the only
+Pages: Overview, Threat map (interactive Cytoscape.js graph), Alerts, Investigate, What-if (live scorer from the saved final models), Rigor and limits. The **evaluation view** (Advanced expander at the foot of the page, off by default) is the only
 place that loads ground-truth labels. The app is read-only: it never trains and never writes. `ITGNN_RESULTS=<dir>` points it at
 another results folder.
 

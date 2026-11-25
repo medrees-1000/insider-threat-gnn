@@ -58,6 +58,12 @@ def _final_rows(path):
     return pd.read_parquet(Path(path) / "final_model_rows.parquet")
 
 
+@st.cache_data
+def _facts(path):
+    p = Path(path) / "ui_week_facts.parquet"
+    return pd.read_parquet(p).set_index(["user", "week_start"]) if p.exists() else None
+
+
 @st.cache_resource
 def _models(path):
     return W.load_models(path)
@@ -88,7 +94,7 @@ st.markdown(f"""<style>
 .st-key-wi_row [data-testid="stHorizontalBlock"] {{ align-items: stretch !important; }}
 .st-key-wi_row [data-testid="stColumn"] {{ align-self: stretch; }}
 .st-key-wi_row [data-testid="stColumn"] > [data-testid="stVerticalBlock"] {{ height: 100%; }}
-[data-testid="stLayoutWrapper"]:has(> .st-key-wi_rating) {{ position: sticky; top: 3.75rem; z-index: 30; background: {PAL['page']}; padding-bottom: 0.4rem; }}
+[data-testid="stLayoutWrapper"]:has(> .st-key-wi_rating) {{ position: sticky; top: 3.75rem; z-index: 30; background: {PAL['page']}; padding-bottom: 0.4rem; max-height: calc(100vh - 4.5rem); overflow-y: auto; }}
 [data-testid="stMetricValue"] {{ font-variant-numeric: tabular-nums; }}
 </style>""", unsafe_allow_html=True)
 
@@ -118,18 +124,21 @@ nav = st.segmented_control("Navigation", NAV, default="Overview", key="nav", lab
 page = nav or st.session_state.get("_page", "Overview")
 st.session_state["_page"] = page
 
-with st.sidebar:
-    st.header("Controls")
-    q = st.radio("Alert budget (share of scored weeks)", U.BUDGETS, index=1, format_func=lambda x: f"{x}%")
-    cw = sorted(scores["cal_week"].unique())
-    start = scores.groupby("cal_week")["week_start"].min()
-    wk = st.selectbox("Calendar week", ["All weeks (global ranking)"] + cw,
-                      format_func=lambda x: x if isinstance(x, str) else f"week {int(x)} ({start[x]:%Y-%m-%d})")
-    wk = None if isinstance(wk, str) else wk
-    eval_view = st.checkbox("Evaluation view (uses ground-truth labels)", value=False)
-    if eval_view:
-        st.error("EVALUATION VIEW: ground-truth labels and attack windows are shown. Analysts never see these.")
-    st.caption(f"Neighbourhood backend: {backend_note}")
+EVAL_PAGES = ("Threat map", "Alerts", "Investigate")
+
+
+def budget_control(where, key):
+    """The one alert-budget control of a page. The value is remembered across pages in `_q` (a widget's own state is dropped when its page is not shown)."""
+    return where.radio("Alert budget (share of scored weeks)", U.BUDGETS, index=U.BUDGETS.index(st.session_state.get("_q", 0.5)), format_func=lambda x: f"{x}%", horizontal=True, key=key,
+                       on_change=lambda: st.session_state.update(_q=st.session_state[key]), help="How many weeks may be flagged as alerts: 0.5% means the riskiest 1 week in 200.")
+
+
+def howto(text, help=None):
+    """ONE sentence under a chart or table; anything longer goes in the tooltip."""
+    st.caption(f"**How to read this:** {text}", help=help)
+
+
+eval_view = bool(st.session_state.get("_eval", False)) and page in EVAL_PAGES
 
 ev = U.load_eval(RESULTS) if (eval_view and page in ("Alerts", "Investigate")) else None  # labels are loaded only here and in the map payload, only on request
 
@@ -168,21 +177,21 @@ def page_overview():
     sets = {"Final model": "W2+E+H", "Without named-site features": "W2+E+H generic", "First baseline": "W2"}
     k1, k2, k3 = st.columns(3)
     f = curve["sets"]["W2+E+H"]
-    k1.metric("Real insiders caught (final model)", f"{f['caught'][i]:.1f} of {curve['n_insiders']}", f"± {f['caught_sd'][i]:.1f} over 5 repeats", delta_color="off")
-    k2.metric("Normal users flagged by mistake", f"{f['normal_flagged'][i]:.1f} of {curve['n_normal_users']}", f"± {f['normal_flagged_sd'][i]:.1f}", delta_color="off")
-    k3.metric("Weeks flagged", f"{f['weeks_flagged'][i]:,.0f}", f"of {curve['n_scored_weeks']:,} scored weeks", delta_color="off")
+    k1.metric("Real insiders caught (final model)", f"{f['caught'][i]:.1f} of {curve['n_insiders']}"); k1.caption(f"varies by ±{f['caught_sd'][i]:.1f} across the 5 repeats")
+    k2.metric("Normal users flagged by mistake", f"{f['normal_flagged'][i]:.1f} of {curve['n_normal_users']}"); k2.caption(f"varies by ±{f['normal_flagged_sd'][i]:.1f} across the 5 repeats")
+    k3.metric("Weeks flagged", f"{f['weeks_flagged'][i]:,.0f}"); k3.caption(f"of {curve['n_scored_weeks']:,} scored weeks")
     rows = [{"model": name, "budget": b, "normal users flagged": curve["sets"][key]["normal_flagged"][j], "insiders caught": curve["sets"][key]["caught"][j], "selected": b == q0}
             for name, key in sets.items() for j, b in enumerate(grid)]
     df = pd.DataFrame(rows)
     colour = alt.Color("model:N", scale=alt.Scale(domain=list(sets), range=[PAL["accent"], PAL["text2"], PAL["muted"]]), legend=alt.Legend(title=None, orient="top", labelLimit=300))
     dash = alt.StrokeDash("model:N", scale=alt.Scale(domain=list(sets), range=[[1, 0], [1, 0], [5, 4]]), legend=None)
-    base = alt.Chart(df).encode(x=alt.X("normal users flagged:Q", title="Normal users flagged by mistake (out of %d)" % curve["n_normal_users"]),
+    base = alt.Chart(df).encode(x=alt.X("normal users flagged:Q", scale=alt.Scale(domain=[0, 30], nice=False), title="Normal users flagged by mistake (out of %d; zoomed to the first 30, where the lines separate)" % curve["n_normal_users"]),
                                 y=alt.Y("insiders caught:Q", scale=alt.Scale(domain=[0, curve["n_insiders"]]), title="Real insiders caught (out of %d)" % curve["n_insiders"]))
-    chart = base.mark_line(strokeWidth=2).encode(color=colour, strokeDash=dash) + base.mark_circle(size=34).encode(color=colour, tooltip=["model", "budget", "insiders caught", "normal users flagged"]) \
-        + base.transform_filter(alt.datum.selected).mark_point(size=190, filled=False, strokeWidth=2.5).encode(color=colour)
+    chart = base.mark_line(strokeWidth=2, clip=True).encode(color=colour, strokeDash=dash) + base.mark_circle(size=34, clip=True).encode(color=colour, tooltip=["model", "budget", "insiders caught", "normal users flagged"]) \
+        + base.transform_filter(alt.datum.selected).mark_point(size=190, filled=False, strokeWidth=2.5, clip=True).encode(color=colour)
     st.altair_chart(chart.properties(height=330), width="stretch")
-    st.caption("**How to read this:** each line follows one model as the alert budget grows; every dot is one budget. Going up means more real insiders caught, going right means more innocent people flagged, so the best lines are high and to the left. "
-               "The ringed dots are the budget you chose. The final model reaches nearly all insiders before it flags many normal users; the first baseline needs far more false alarms to catch the same number.")
+    howto("each line is one model as the alert budget grows, so the best line is high (more insiders caught) and to the left (fewer innocent people flagged).",
+          help="Every dot is one budget; the ringed dots are the budget you chose. The final model reaches nearly all insiders before it flags many normal users, while the first baseline needs far more false alarms to catch the same number. The axis stops at 30 normal users because the lines have separated by then; the full range is in the Rigor and limits page.")
     st.subheader("How we know it works")
     t, cv, ca, gr = facts["tenure_leak"], facts["cross_validation"], facts["causality_check"], facts["graph_controls"]
     items = [
@@ -201,18 +210,14 @@ def page_overview():
 
 def page_map():
     st.subheader("Threat map")
-    st.caption("Flagged user-weeks (the top 2% of all scored weeks) and what they touched. Week view: one calendar week at a time. "
-               "Campaign view: flagged users linked through websites, PCs and email shared by at least two of them. "
-               "Risk colours follow the alert budgets; named-site categories are labelled.")
     payload, stats = _payload(RESULTS, source.name, bool(eval_view))
     import threat_map
     threat_map.render(payload, PAL, on_open=_map_open, focus=st.session_state.get("map_focus"))
-    st.caption("**How to read this:** every large dot is a person in a week when the model put them among the riskiest 2% of all weeks; the redder and bigger the dot, the riskier the week. "
-               "Lines join a person to the websites, computers and colleagues they used that week, so anything several flagged people share (a website, a computer) is worth a look. "
-               "Websites in a named category (leak, keylogger, job, cloud storage) are always labelled. Click any dot for the evidence behind its score.")
     c = payload["campaign"]
-    st.caption(f"{stats['user_weeks_drawn']:,} flagged user-weeks, {stats['connectors']:,} websites/PCs/contacts, {stats['edges']:,} edges in total; the week view draws only the selected week. "
-               f"Campaign view: {len(c['users'])} users, {c['modularity']} modularity ({len(c['clusters'])} communities of at least 3): weak structure means the clusters are suggestive, not proof.")
+    howto("every large dot is a flagged person-week (the riskiest 2% of all weeks), redder and bigger means riskier, and lines join them to the websites, PCs and colleagues they used, so anything several flagged people share is worth a look.",
+          help=f"Week view shows one calendar week; Campaign view links flagged users through websites, PCs and email shared by at least two of them. Named-site categories are always labelled. "
+               f"{stats['user_weeks_drawn']:,} flagged user-weeks, {stats['connectors']:,} websites/PCs/contacts and {stats['edges']:,} edges in total. Campaign view: {len(c['users'])} users in {len(c['clusters'])} communities of at least 3, "
+               f"modularity {c['modularity']}; weak structure means the clusters are suggestive, not proof.")
     qs = load_queries()
     su, sw = st.session_state.sel_user, st.session_state.sel_week
     links = []
@@ -222,8 +227,18 @@ def page_map():
     st.markdown("Open in Neo4j Browser (log in with the password from `.env`): " + " · ".join(f"[{t}]({u})" for t, u in links))
 
 
+PAGE = 25   # rows added by each "show more"
+
+
 def page_alerts():
     sp = _scores_p(RESULTS)
+    c1, c2, c3 = st.columns([3, 3, 2])
+    q = budget_control(c1, "q_al")
+    cw = sorted(scores["cal_week"].unique())
+    start = scores.groupby("cal_week")["week_start"].min()
+    wk = c2.selectbox("Calendar week", ["All weeks (global ranking)"] + cw, key="al_wk", format_func=lambda x: x if isinstance(x, str) else f"week {int(x)} ({start[x]:%Y-%m-%d})")
+    wk = None if isinstance(wk, str) else wk
+    per_week = c3.toggle("One row per week", value=False, key="al_per_week", help="Off: one row per person, showing their worst flagged week. On: every flagged week is its own row.")
     alerts = U.rank_alerts(sp, q, wk)
     scope = "all weeks" if wk is None else f"calendar week {int(wk)}"
     st.subheader(f"Top {q}% of weeks ({scope})")
@@ -231,33 +246,42 @@ def page_alerts():
         st.info("No scored weeks for this selection."); return
     g = metrics["ui_global_lists"][str(q)] if wk is None else None
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Alerts", f"{len(alerts):,}")
+    k1.metric("Alerts", f"{len(alerts):,}", help="Weeks flagged at this budget.")
     k2.metric("Different people", f"{alerts['user'].nunique()}")
-    k3.metric("Expected real attack weeks", f"{g['week precision']:.0%}" if g else "n/a", "measured on evaluation data" if g else "all-weeks lists only", delta_color="off")
-    k4.metric("Insiders caught (of 70)", f"{g['insiders caught']}" if g else "n/a", "global list, evaluation data" if g else None, delta_color="off")
-    if wk is None:
-        st.caption("This is a global top-q% list over the whole period, which matches the reported results and is easier than a real weekly queue: pick a calendar week in the sidebar to see a weekly queue.")
-    c1, c2 = st.columns([2, 1])
-    display = c1.radio("Show risk as", U.DISPLAYS, horizontal=True, key="al_display", help="Raw scores of the top rows all read 0.9999, so the default is the percentile (how many weeks score lower).")
-    show_sd = c2.checkbox("Show spread over the 5 repeats", value=False)
-    t = U.alerts_frame(alerts, display, show_sd)
+    k3.metric("Expected real attack weeks", f"{g['week precision']:.0%}" if g else "n/a", help="Share of the flagged weeks that were real attack weeks, measured on the evaluation data (all-weeks lists only).")
+    k4.metric("Insiders caught (of 70)", f"{g['insiders caught']}" if g else "n/a", help="Out of the 70 insiders, measured on the evaluation data (all-weeks lists only).")
+    t = U.alerts_by_week(alerts, show_sd=st.session_state.get("al_sd", False)) if per_week else U.alerts_by_person(alerts)
+    wcol = "Week" if per_week else "Worst week"
     if ev is not None:
-        t = t.merge(ev[["user", "week_start", "label", "scenario"]].rename(columns={"user": "Person", "week_start": "Week", "label": "Attack week (truth)", "scenario": "Scenario (truth)"}), on=["Person", "Week"], how="left")
-    lo, hi = {"Percentile": (float(t["Risk"].min()) - 0.05, 100.0), "Log-odds": (float(t["Risk"].min()) - 0.5, float(t["Risk"].max()) + 0.5), "Raw score": (0.0, 1.0)}[display]
-    fmt = {"Percentile": "%.2f", "Log-odds": "%.1f", "Raw score": "%.4f"}[display]
-    cfg = {"Week": st.column_config.DateColumn("Week", format="YYYY-MM-DD"), "Risk": st.column_config.ProgressColumn("Risk (final model)", format=fmt, min_value=lo, max_value=hi),
-           "Without named sites": st.column_config.NumberColumn("Without named sites", format=fmt, help="Rating from features that do not use the named-site (leak, job, cloud, keylogger, competitor) categories."),
-           "Why": st.column_config.ListColumn("Main reasons (push up)")}
-    event = st.dataframe(t, hide_index=True, width="stretch", column_config=cfg, on_select="rerun", selection_mode="single-row", key="al_tbl", height=min(35 * (len(t) + 1) + 3, 520))
-    st.caption("**How to read this:** each row is one person in one week. The bar shows how risky the model rated that week (a fuller bar is riskier; in percentile mode it is the share of all weeks that scored lower). "
-               "'Without named sites' is the same rating with the near-label named-site features removed. 'Main reasons' are the two kinds of behaviour that pushed the score up the most. Click a row to select it.")
+        tr = ev[["user", "week_start", "label", "scenario"]].rename(columns={"user": "Person", "week_start": wcol, "label": "Attack week (truth)", "scenario": "Scenario (truth)"})
+        t = t.merge(tr, on=["Person", wcol], how="left")
+    sig = (q, wk, per_week)
+    if st.session_state.get("al_sig") != sig:
+        st.session_state.al_sig, st.session_state.al_n = sig, PAGE
+    shown = min(st.session_state.al_n, len(t))
+    tv = t.head(shown)
+    lo, hi = float(alerts["z"].min()) - 0.05, float(alerts["z"].max())
+    cfg = {"Rank": st.column_config.NumberColumn("Rank", width=55), "Person": st.column_config.TextColumn("Person", width=85), "Flagged weeks": st.column_config.NumberColumn("Flagged weeks", width=105),
+           wcol: st.column_config.DateColumn(wcol, format="YYYY-MM-DD", width=105),
+           "Risk": st.column_config.ProgressColumn("Risk (log-odds)", width=140, format="%.1f", min_value=lo, max_value=hi, help="Runs from the alert cut-off (empty) to the highest score in this list (full)."),
+           "Position": st.column_config.TextColumn("Rarity", width=105, help="How rare this week is among all scored weeks."),
+           "Needs named sites": st.column_config.TextColumn("Needs named sites", width=125, help="'yes' = without the named-site features (leak, job, cloud, keylogger, competitor sites) this week would not rank in the same alert list."),
+           "Why": st.column_config.ListColumn("Main reasons (push up)", width=330)}
+    event = st.dataframe(tv, hide_index=True, width="stretch", column_config=cfg, on_select="rerun", selection_mode="single-row", key=f"al_tbl_{int(per_week)}", height=35 * (len(tv) + 1) + 3)   # full height: no scroll box inside the page
+    if shown < len(t):
+        st.button(f"Show {min(PAGE, len(t) - shown)} more (showing {shown} of {len(t)})", on_click=lambda: st.session_state.update(al_n=shown + PAGE))
+    if per_week:
+        st.checkbox("Show spread over the 5 repeats", key="al_sd", help="How much the score moved between the 5 repeats of the evaluation.")
+    howto("each row is one " + ("alerted week" if per_week else "person, ranked by their riskiest week") + "; the bar runs from the alert cut-off to the highest score in the list and 'Rarity' says how few weeks score higher.",
+          help="'Main reasons' are the two kinds of behaviour that pushed the score up most. 'Needs named sites' marks rows that would drop out of the list without the named-site features. Click a row to select it.")
     rows = event.selection.rows if event is not None and event.selection else []
     i = rows[0] if rows else 0
-    if not rows:
-        st.caption("No row selected: the buttons act on the top alert.")
-    u, w = alerts.iloc[i]["user"], alerts.iloc[i]["week_start"]
-    st.session_state.sel_user, st.session_state.sel_week = u, w
-    st.markdown(f"**Selected:** {u}, week of {w:%Y-%m-%d}")
+    if per_week:
+        u, w = t.iloc[i]["Person"], t.iloc[i]["Week"]
+    else:
+        u = t.iloc[i]["Person"]; w = t.iloc[i]["Worst week"]
+    st.session_state.sel_user, st.session_state.sel_week = u, pd.Timestamp(w)
+    st.markdown(f"**Selected:** {u}, week of {pd.Timestamp(w):%Y-%m-%d}" + ("" if rows else " (the top alert; click a row to choose another)"))
     a, b, _ = st.columns([1, 1, 4])
     a.button("Open in Investigate", on_click=goto, args=("Investigate", u, w))
     b.button("Open in Threat map", on_click=goto, args=("Threat map", u, w))
@@ -276,10 +300,9 @@ def page_investigate():
     row = scores[(scores["user"] == user) & (scores["week_start"] == pick)].iloc[0]
     prow = sp[(sp["user"] == user) & (sp["week_start"] == pick)].iloc[0]
     cuts = U.budget_cutoffs(scores)
-    c1_, c2_, c3_ = st.columns(3)
-    c1_.metric("Risk percentile", f"{prow['pct']:.2f}", f"score {row['score']:.4f} ± {row['score_sd']:.4f}", delta_color="off")
-    c2_.metric("Without named sites", f"{prow['pct_g']:.2f}", f"score {row['score_generic']:.4f}", delta_color="off")
-    c3_.metric("Alert level", next((f"top {b}%" for b in U.BUDGETS if row["score"] >= cuts[b]), "not an alert"))
+    c1_, c2_, _ = st.columns([1, 1, 1])
+    c1_.metric("Alert level", next((f"top {b}%" for b in U.BUDGETS if row["score"] >= cuts[b]), "not an alert"), help=f"Risk score {row['score']:.4f}, riskier than {prow['pct']:.2f}% of all scored weeks.")
+    c2_.metric("Rarity without named sites", U.top_label(prow["pct_g"]), help=f"The same rating using only features that do not name leak, job, cloud, keylogger or competitor sites (score {row['score_generic']:.4f}).")
     st.subheader("This person over time")
     long = pd.concat([tl.assign(series="Final model")[["week_start", "score", "series"]], tl.assign(series="Without named sites", score=tl["score_generic"])[["week_start", "score", "series"]]])
     colour = alt.Color("series:N", scale=alt.Scale(domain=["Final model", "Without named sites"], range=[PAL["accent"], PAL["muted"]]), legend=alt.Legend(title=None, orient="top"))
@@ -301,14 +324,24 @@ def page_investigate():
         else:
             st.error("EVALUATION VIEW: this person is not a listed insider.")
     st.altair_chart(alt.layer(*layers).resolve_scale(color="independent").properties(height=330), width="stretch")
-    st.caption("**How to read this:** each dot is one week of this person; the line joins them in time and a higher dot means a riskier week. The coloured bands mark the alert levels: a dot inside a band would be an alert at that budget "
-               "(the top band is the strictest). The ringed dot is the week selected above. Weeks before a person's fifth active week are not scored.")
+    howto("each dot is one week of this person, higher is riskier, and a dot inside a coloured band would be an alert at that budget.",
+          help="The top band is the strictest budget. The ringed dot is the week selected above. Weeks before a person's fifth active week are not scored.")
+    st.subheader(f"This week compared with {user}'s usual")
+    fx = _facts(RESULTS)
+    if fx is None or (user, pick) not in fx.index:
+        st.info("The comparison needs `ui_week_facts.parquet`. Create it with `python -m itgnn.ui_export weekfacts`.")
+    else:
+        vt = U.week_vs_usual(fx.loc[(user, pick)])
+        sty = vt.style.format({"This week": "{:g}", "Their usual": "{:.1f}"}).map(lambda v: f"color: {PAL['risk'][3]}; font-weight: 700" if str(v).startswith("▲") else "", subset=["Compared with usual"])
+        st.dataframe(sty, hide_index=True, width="stretch", height=35 * (len(vt) + 1) + 3)
+        howto("each row sets this week's count beside the person's own average over their earlier weeks, and a red marker means at least double and at least 3 more than usual.",
+              help="'Their usual' is the average of the same count over the weeks before this one (never including this week or later ones). ↑ means above by more than a quarter; the table uses existing features only.")
     st.subheader(f"Why the week of {pick:%Y-%m-%d} scored as it did")
     g = pd.DataFrame({"group": list(U.GROUP_COLS.values()), "contribution": [float(row[c]) for c in U.GROUP_COLS]})
     st.altair_chart(alt.Chart(g).mark_bar().encode(y=alt.Y("group:N", sort="-x", title=None, axis=alt.Axis(labelLimit=230, labelOverlap=False)), x=alt.X("contribution:Q", title="Pushes the risk up (right) or down (left)"),
                     color=alt.condition(alt.datum.contribution > 0, alt.value(PAL["positive"]), alt.value(PAL["negative"]))).properties(height=300), width="stretch")
-    st.caption("**How to read this:** each bar is one kind of behaviour. A bar to the right pushed this week's risk up, a bar to the left pulled it down, and a longer bar means a bigger push; the longest bar is what mattered most. "
-               f"The starting point before any behaviour is counted is {float(row['bias']):+.2f} on the model's log-odds scale. These are explanations of the score, not proof of why someone is risky.")
+    howto("each bar is one kind of behaviour, to the right pushed this week's risk up, to the left pulled it down, and the longest bar mattered most.",
+          help=f"The starting point before any behaviour is counted is {float(row['bias']):+.2f} on the model's log-odds scale. These are explanations of the score, not proof of why someone is risky.")
     st.button("Show this person in the Threat map", on_click=goto, args=("Threat map", user, pick))
 
 
@@ -368,7 +401,7 @@ def page_whatif():
         pct, pct_g = W.percentile(meta, "score", score), W.percentile(meta, "score_generic", score_g)
         v = W.verdict(meta, score)
         with right:
-            with st.container(key="wi_rating", border=True):   # pinned (sticky) so the rating stays in view while the sliders are used
+            with st.container(key="wi_rating", border=True):   # ONE sticky block: rating, notes and bars stay together, so nothing scrolls underneath anything
                 st.caption("Risk rating of this week (final model)")
                 st.markdown(f"#### Riskier than {pct:.2f}% of real weeks")
                 if v is not None:
@@ -376,18 +409,18 @@ def page_whatif():
                 else:
                     st.info(f"Would not be an alert at any budget up to 2% (score {score:.4f}).")
                 a, b = st.columns(2)
-                a.metric("All features: riskier than", f"{pct:.1f}%", f"of weeks · score {score:.4f}", delta_color="off")
-                b.metric("No named sites: riskier than", f"{pct_g:.1f}%", f"of weeks · score {score_g:.4f}", delta_color="off")
-            for n in notes:
-                st.info(n)
-            for w_ in W.range_warnings(meta, feats, list(cur) + [k for k in overrides if k in meta["p99"]]):
-                st.warning(w_)
-            g = pd.DataFrame({"group": list(U.GROUP_COLS.values()), "contribution": [float(res[k].iloc[0]) for k in meta["groups"]]})
-            st.altair_chart(alt.Chart(g).mark_bar().encode(y=alt.Y("group:N", sort="-x", title=None, axis=alt.Axis(labelLimit=230, labelOverlap=False)), x=alt.X("contribution:Q", title="Pushes the risk up (right) or down (left)"),
-                            color=alt.condition(alt.datum.contribution > 0, alt.value(PAL["positive"]), alt.value(PAL["negative"]))).properties(height=330), width="stretch")
-            st.caption("**How to read this:** each bar is one kind of behaviour. A bar to the right pushed this week's risk up, a bar to the left pulled it down, and a longer bar means a bigger push. The longest bar is what moved this rating the most.")
-    st.caption("This rating is a ranking signal (how this week compares with real weeks), not the probability that someone is an insider. Named-site features (leak, keylogger, job, cloud and competitor sites) are close to label markers in this synthetic data, so look at the 'no named sites' rating too. "
-               "The final model has seen every week, so its ratings differ slightly from the out-of-sample scores shown on the other pages.")
+                a.metric("All features: riskier than", f"{pct:.1f}%", help=f"Score {score:.4f}.")
+                b.metric("No named sites: riskier than", f"{pct_g:.1f}%", help=f"The same rating without the named-site features (score {score_g:.4f}).")
+                for n in notes:
+                    st.info(n)
+                for w_ in W.range_warnings(meta, feats, list(cur) + [k for k in overrides if k in meta["p99"]]):
+                    st.warning(w_)
+                g = pd.DataFrame({"group": list(U.GROUP_COLS.values()), "contribution": [float(res[k].iloc[0]) for k in meta["groups"]]})
+                st.altair_chart(alt.Chart(g).mark_bar().encode(y=alt.Y("group:N", sort="-x", title=None, axis=alt.Axis(labelLimit=230, labelOverlap=False)), x=alt.X("contribution:Q", title="Pushes the risk up (right) or down (left)"),
+                                color=alt.condition(alt.datum.contribution > 0, alt.value(PAL["positive"]), alt.value(PAL["negative"]))).properties(height=250), width="stretch")
+                howto("each bar is one kind of behaviour, to the right pushed this rating up, to the left pulled it down, and the longest bar moved it the most.")
+    st.caption("This rating is a ranking signal (how this week compares with real weeks), not the probability that someone is an insider.",
+               help="Named-site features (leak, keylogger, job, cloud and competitor sites) are close to label markers in this synthetic data, so look at the 'no named sites' rating too. The final model has seen every week, so its ratings differ slightly from the out-of-sample scores shown on the other pages.")
     st.subheader("Sweep one behaviour")
     st.write("Pick one behaviour and see how the rating changes from none to a lot, with everything else held where you set it. The list starts with the behaviour that moves this rating the most.")
     cur_all = dict(cur)
@@ -410,18 +443,19 @@ def page_whatif():
     names_ = alt.Chart(cuts.assign(x=xmax)).mark_text(align="right", baseline="bottom", dx=-4, dy=-2, color=PAL["text"], fontSize=11).encode(x="x:Q", y=alt.Y("z:Q", scale=ysc), text="label:N")
     here = alt.Chart(pd.DataFrame({"x": [cur_all[knob]]})).mark_rule(color=PAL["text"], strokeWidth=1.5).encode(x="x:Q")
     st.altair_chart((line + rules + names_ + here).properties(height=320), width="stretch")
-    st.caption("**How to read this:** the line shows how risky the model thinks the week is as you turn just this one behaviour up from none to a lot; higher is riskier. The dashed lines are the alert cut-offs: where the blue line is above one, "
-               "that week would be an alert at that budget. The white vertical line is where the slider is now. A flat line means the model hardly reacts to this behaviour on its own; steps are normal, because the model decides in thresholds.")
+    howto("the line shows the rating as you turn just this behaviour up from none to a lot, and where it is above a dashed alert cut-off the week would be an alert at that budget.",
+          help="The white vertical line is where the slider is now. A flat line means the model hardly reacts to this behaviour on its own; steps are normal because the model decides in thresholds.")
+    q = budget_control(st, "q_wi")
     cut = meta["budget_cutoffs"][str(q)]
     cr = W.first_crossing(df, cut, cur_all[knob], score)
     lab_, now_, typ_, p99_ = W.LABELS[knob], cur_all[knob], typical[knob], meta["p99"][knob]
+    rd = "this sentence reads the same line as the chart above: the first value where it crosses the dashed cut-off of the budget chosen here, with every other slider where it is."
     if cr is None:
-        st.markdown(f"**What would it take?** Within the range {df['value'].min():g} to {df['value'].max():g}, changing only *{lab_.lower()}* " + ("never makes this week an alert" if score < cut else "never stops this week being an alert") + f" at the {q}% budget (pick another budget in the sidebar).")
+        st.markdown(f"**What would it take?** Within the range {df['value'].min():g} to {df['value'].max():g}, changing only *{lab_.lower()}* " + ("never makes this week an alert" if score < cut else "never stops this week being an alert") + f" at the {q}% budget.", help=rd)
     elif cr[0] == "up":
-        st.markdown(f"**What would it take?** *{lab_}* would need to reach about **{cr[1]:g}** (now {now_:g}; a typical week has {typ_:g}) for this week to become an alert at the {q}% budget." + (f" That is beyond what 99% of real weeks show ({p99_:g})." if cr[1] > p99_ else ""))
+        st.markdown(f"**What would it take?** *{lab_}* would need to reach about **{cr[1]:g}** (now {now_:g}; a typical week has {typ_:g}) for this week to become an alert at the {q}% budget." + (f" That is beyond what 99% of real weeks show ({p99_:g})." if cr[1] > p99_ else ""), help=rd)
     else:
-        st.markdown(f"**What would it take?** This week stops being an alert at the {q}% budget if *{lab_.lower()}* falls below about **{cr[1]:g}** (now {now_:g}).")
-    st.caption("**How to read this:** this sentence reads the same line as the chart above: it finds the first value where the blue line crosses the dashed cut-off of the alert budget chosen in the sidebar, keeping every other slider where it is.")
+        st.markdown(f"**What would it take?** This week stops being an alert at the {q}% budget if *{lab_.lower()}* falls below about **{cr[1]:g}** (now {now_:g}).", help=rd)
 
 
 def page_rigor():
@@ -429,13 +463,13 @@ def page_rigor():
     curve, facts = _json(RESULTS, "ui_budget_curve.json"), _json(RESULTS, "ui_rigor_facts.json")
     st.subheader("Does it rank attack weeks above ordinary weeks?")
     pr = metrics["pr_auc_25fold"]
-    names = {"W2": "First baseline (counts + history)", "W2+calendar": "Baseline + calendar week (a trick)", "W2+E+H generic": "Email + web, no named-site features", "W2+E+H": "Final model (email + web + named sites)"}
+    names = {"W2": "First baseline (counts + history)", "W2+calendar": "Baseline + week of the year (timing-only control)", "W2+E+H generic": "Email + web, no named-site features", "W2+E+H": "Final model (email + web + named sites)"}
     d = pd.DataFrame({"model": [names[k] for k in names], "score": [pr[k]["pr_auc_mean"] for k in names], "lo": [pr[k]["pr_auc_mean"] - pr[k]["pr_auc_std"] for k in names], "hi": [pr[k]["pr_auc_mean"] + pr[k]["pr_auc_std"] for k in names]})
     bars = alt.Chart(d).mark_bar(color=PAL["accent"]).encode(y=alt.Y("model:N", sort=list(names.values()), title=None, axis=alt.Axis(labelLimit=320)), x=alt.X("score:Q", scale=alt.Scale(domain=[0, 1]), title="Ranking quality (PR-AUC, 1.0 = perfect)"))
     err = alt.Chart(d).mark_errorbar(color=PAL["text"], ticks=True, thickness=2).encode(y=alt.Y("model:N", sort=list(names.values())), x=alt.X("lo:Q", title=""), x2="hi:Q")
     st.altair_chart((bars + err).properties(height=190), width="stretch")
-    st.caption("**How to read this:** each bar is how well a model ranks real attack weeks above ordinary ones (longer is better; 1.0 would be perfect and random guessing is about "
-               f"{metrics['attack_weeks'] / metrics['n_scored_weeks']:.3f}). The thin line is the spread over the 25 train/test splits, so bars whose lines do not overlap really differ.")
+    howto("each bar is how well a model ranks real attack weeks above ordinary ones (longer is better), and bars whose thin lines do not overlap really differ.",
+          help=f"1.0 would be a perfect ranking and random guessing scores about {metrics['attack_weeks'] / metrics['n_scored_weeks']:.3f}. The thin line is the spread over the 25 train/test splits. The 'week of the year' bar adds only the calendar week to the baseline, to check that timing alone does not explain the result.")
     if curve:
         st.subheader("Real insiders caught against false alarms")
         short = {"W2": "First baseline", "W2+E+H generic": "No named sites", "W2+E+H": "Final model"}
@@ -445,8 +479,8 @@ def page_rigor():
         c1, c2 = st.columns(2)
         c1.altair_chart((base.mark_line(strokeWidth=2).encode(y=alt.Y("caught:Q", scale=alt.Scale(domain=[0, curve["n_insiders"]]), title=f"Real insiders caught (of {curve['n_insiders']})")) + base.mark_circle(size=30).encode(y="caught:Q")).properties(height=280), width="stretch")
         c2.altair_chart((base.mark_line(strokeWidth=2).encode(y=alt.Y("false alarms:Q", title=f"Normal people flagged (of {curve['n_normal_users']})")) + base.mark_circle(size=30).encode(y="false alarms:Q")).properties(height=280), width="stretch")
-        st.caption("**How to read this:** left, a higher line means more real insiders found; right, a lower line means fewer innocent people flagged. Each dot is one alert budget (how many weeks may be flagged), "
-                   "moving right allows more alerts. The best model is high on the left chart and low on the right chart at the same budget.")
+        howto("left, a higher line means more real insiders found; right, a lower line means fewer innocent people flagged, so the best model is high on the left and low on the right.",
+              help="Each dot is one alert budget (how many weeks may be flagged); moving right allows more alerts.")
     st.subheader("Does it hold up on weeks it has not seen?")
     ts = pd.DataFrame(metrics["time_split"]).assign(test="Same people, later weeks")
     dh = pd.DataFrame(metrics["double_holdout"]).rename(columns={"pr_auc_pooled": "pr_auc"}).assign(test="New people, later weeks")
@@ -458,30 +492,42 @@ def page_rigor():
               color=alt.Color("Model:N", scale=alt.Scale(domain=["First baseline", "No named sites", "Final model"], range=[PAL["muted"], PAL["text2"], PAL["accent"]]), legend=alt.Legend(title=None, orient="top")),
               tooltip=["Model", "cutoff", alt.Tooltip("R:Q", format=".2f")])
         col.altair_chart(ch.properties(height=250), width="stretch")
-    st.caption("**How to read this:** a tall bar means the model kept most of the accuracy it shows in the main evaluation when it only had earlier weeks to learn from; 1.0 means no loss. "
-               "Bars are short for the earliest cutoff because very few attacks had happened yet, and shorter again when the test people are completely new.")
+    howto("a tall bar means the model kept most of its main-evaluation accuracy when it only had earlier weeks to learn from, and 1.0 means no loss.",
+          help="Bars are short for the earliest cutoff because very few attacks had happened yet, and shorter again when the test people are completely new.")
     if facts and facts.get("graph_controls"):
         gc = facts["graph_controls"]
         st.subheader("Do connections between people add anything?")
         gd = pd.DataFrame({"model": ["No connections (same features)", "With connections", "Connections scrambled", "Simple model we use"], "score": [gc["no_edge_mlp"], gc["graphsage"], gc["graphsage_shuffled_edges"], gc["xgboost_same_features"]]})
         st.altair_chart(alt.Chart(gd).mark_bar(color=PAL["accent"]).encode(y=alt.Y("model:N", sort=list(gd["model"]), title=None, axis=alt.Axis(labelLimit=300)), x=alt.X("score:Q", scale=alt.Scale(domain=[0, 1]), title="Ranking quality (PR-AUC)")).properties(height=170), width="stretch")
-        st.caption("**How to read this:** the first three bars are the same neural network with real connections, none, and scrambled ones; if connections mattered the second bar would clearly beat the others. It does not, and the simple model (last bar) beats all three.")
+        howto("the first three bars are the same neural network with real connections, none, and scrambled ones, and connections would matter only if the second bar clearly beat the others, which it does not.",
+              help="The simple model (last bar) beats all three.")
     st.subheader("Limitations")
     for line in U.limitations(metrics):
         st.markdown(f"- {line}")
     st.subheader("All the numbers")
-    with st.expander("Global list versus a real weekly queue"):
+    with st.expander("Alert lists by budget (all-weeks list and weekly queue)"):
         st.dataframe(T["lists"].reset_index(), hide_index=True, width="stretch")
-        st.caption("**How to read this:** each row is one alert budget. 'Insiders caught' is how many of the 70 insiders appear in the list and 'normal users flagged' how many innocent people; the weekly-queue rows are what you would get picking the riskiest weeks inside each calendar week instead.")
+        howto("each row is one alert budget, with how many of the 70 insiders and how many innocent people end up in the list.",
+              help="The weekly-queue rows pick the riskiest weeks inside each calendar week instead of across the whole period.")
     with st.expander("Ranking quality over 25 splits"):
         st.dataframe(T["pr_auc"], width="stretch"); st.dataframe(T["paired"], width="stretch")
-        st.caption("**How to read this:** first table, a higher PR-AUC is better and the spread column shows how much it moved between splits. Second table, 'mean PR-AUC difference' is the gain of the first model over the second on the same splits; 'folds positive' counts the splits where it won (25/25 = every time).")
+        howto("in the first table a higher PR-AUC is better, and in the second 'folds positive' counts the splits where the first model beat the second (25/25 = every time).",
+              help="The spread column shows how much the score moved between splits; 'mean PR-AUC difference' is the gain of the first model over the second on the same splits.")
     with st.expander("Alert budget over 25 splits"):
         st.dataframe(T["budget"], hide_index=True, width="stretch")
-        st.caption("**How to read this:** for each model and budget, how many of the 70 insiders were caught and how many of the 930 normal people were flagged; more caught and fewer flagged is better.")
+        howto("for each model and budget, how many of the 70 insiders were caught and how many of the 930 normal people were flagged, so more caught and fewer flagged is better.")
     with st.expander("Time-based tests"):
         st.dataframe(T["time_split"], hide_index=True, width="stretch"); st.dataframe(T["double_holdout"], hide_index=True, width="stretch")
-        st.caption("**How to read this:** 'retention R' is the time-based result divided by the main result on the same weeks, so 1.0 means nothing was lost; the first table uses the same people on both sides, the second completely new people.")
+        howto("'retention R' is the time-based result divided by the main result on the same weeks, so 1.0 means nothing was lost.",
+              help="The first table uses the same people on both sides, the second completely new people.")
 
 
 {"Overview": page_overview, "Threat map": page_map, "Alerts": page_alerts, "Investigate": page_investigate, "What-if": page_whatif, "Rigor and limits": page_rigor}[page]()
+st.divider()
+if page in EVAL_PAGES:   # only the pages that can show labels get the switch; it sits in an Advanced expander at the foot of the page, off by default
+    with st.expander("Advanced"):
+        st.checkbox("Evaluation view (uses ground-truth labels)", value=bool(st.session_state.get("_eval", False)), key="w_eval",
+                    on_change=lambda: st.session_state.update(_eval=st.session_state.w_eval))
+        if eval_view:
+            st.error("EVALUATION VIEW: ground-truth labels and attack windows are shown. Analysts never see these.")
+st.caption(f"Neighbourhood backend: {backend_note}")

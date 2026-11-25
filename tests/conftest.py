@@ -80,6 +80,11 @@ def ui_results_full(ui_results):
     json.dump(meta, open(ui_results / "final_model_meta.json", "w"))
     rows = X.head(5).copy(); rows.insert(0, "week_start", pd.date_range("2010-06-07", periods=5, freq="7D")); rows.insert(0, "user", [f"U{i}" for i in range(5)])
     rows.to_parquet(ui_results / "final_model_rows.parquet", index=False)
+    from itgnn.ui_export import WEEK_FACT_COLS
+    wf = sc[["user", "week_start"]].copy()
+    for k in WEEK_FACT_COLS:
+        wf[k] = rng.integers(0, 12, len(wf)).astype("float32"); wf[f"hist_mean_{k}"] = np.float32(2.0)
+    wf.to_parquet(ui_results / "ui_week_facts.parquet", index=False)
     grid_b = [0.1, 0.25, 0.5, 1.0, 2.0]
     sets_c = {k: {"caught": [40.0, 50.0, 55.0, 60.0, 65.0], "caught_sd": [1.0] * 5, "normal_flagged": [0.0, 1.0, 3.0, 9.0, 30.0], "normal_flagged_sd": [1.0] * 5, "weeks_flagged": [60.0, 150.0, 300.0, 600.0, 1200.0]}
               for k in ("W2", "W2+E+H generic", "W2+E+H")}
