@@ -59,12 +59,28 @@ export default function (component) {
     { selector: 'edge.mailu', style: { 'line-color': T.edge.mail, 'line-style': 'solid', opacity: 0.9, 'curve-style': 'bezier' } },
     { selector: 'node.lblh', style: { 'text-opacity': 0 } },
     { selector: 'node.lblforce', style: { 'text-opacity': 1, 'z-index': 999 } },
+    { selector: 'node.hovn', style: { 'border-width': 2.5, 'border-color': T.accent, 'border-opacity': 0.75, 'border-style': 'solid' } },
+    { selector: 'node.hov', style: { 'border-width': 3.5, 'border-color': T.accent, 'border-opacity': 1, 'border-style': 'solid' } },
+    { selector: 'edge.hove', style: { opacity: 0.95, width: (e) => e.data('w') + 1.2 } },
     { selector: '.dim', style: { opacity: 0.1, 'text-opacity': 0 } },
     { selector: 'edge.hl', style: { opacity: 0.95 } },
     { selector: 'node.sel', style: { 'border-width': 4, 'border-color': T.accent, 'border-style': 'solid' } },
   ];
   const cy = cytoscape({ container: canvas, elements: [], style, minZoom: 0.15, maxZoom: 4, textureOnViewport: true, hideEdgesOnViewport: true });
   canvas.style.position = 'relative';
+
+  // ---- stale hit-testing fix -----------------------------------------------------------------------------------------------------
+  // Cytoscape caches the container's client rectangle (renderer.containerBB). Streamlit scrolls inside its own container, which never tells
+  // Cytoscape, so after any scroll every pointer event was hit-tested a scroll-distance away from the node. Invalidate the cache whenever the
+  // pointer touches the graph (the next event re-measures once) and whenever ANY ancestor scrolls (scroll does not bubble, so use capture on
+  // the document), and re-measure the canvas when its size changes.
+  const inv = () => { try { cy.renderer().invalidateContainerClientCoordsCache(); } catch (e) { /* renderer not ready yet */ } };
+  const passive = { capture: true, passive: true };
+  ['pointerenter', 'pointermove', 'pointerdown', 'mousedown', 'wheel', 'touchstart'].forEach((t) => canvas.addEventListener(t, inv, passive));
+  document.addEventListener('scroll', inv, passive); window.addEventListener('resize', inv, passive);
+  let rsz = null;
+  const ro = new ResizeObserver(() => { if (rsz) return; rsz = requestAnimationFrame(() => { rsz = null; try { cy.resize(); } catch (e) { /* destroyed */ } inv(); }); });
+  ro.observe(canvas);
   window.__tmDebug = { cy, root, setWeek: (w) => { S.week = w; draw(); }, setView: (v) => { S.view = v; draw(); }, focus: (id) => focus(cy.getElementById(id)), state: S };
 
   // ---- element builders ------------------------------------------------------------------------
@@ -157,7 +173,7 @@ export default function (component) {
     return { labeled: cy.nodes('.labeled').not('.cluster').length, visible: vis.length, hidden: cy.nodes('.labeled.lblh').length, usersHidden: cy.nodes('.user.labeled.lblh').length, users: cy.nodes('.user').length, overlappingVisiblePairs: ov }; };
 
   // ---- draw / layout ---------------------------------------------------------------------------
-  let playTimer = null, lastLayoutMs = 0;
+  let playTimer = null, lastLayoutMs = 0, dragging = false;
   function draw() {
     cy.elements().remove(); cy.add(S.view === 'week' ? weekElements() : campaignElements());
     const t = performance.now();
@@ -166,10 +182,61 @@ export default function (component) {
     if (n && S.view === 'campaign') cy.layout({ name: 'preset', fit: true, padding: 40 }).run();
     else if (n) cy.layout({ name: 'cose', animate: false, randomize: false, fit: true, padding: 36, nodeRepulsion: () => (S.view === 'week' ? 36000 : 16000), idealEdgeLength: () => (S.view === 'week' ? 120 : 70),
       edgeElasticity: () => 80, gravity: S.view === 'week' ? 0.09 : 0.3, numIter: S.view === 'week' ? 800 : 900, nestingFactor: 0.9, componentSpacing: 60 }).run();
+    inv(); stopElastic(); elastic.on = n > 0 && cy.nodes().not(".cluster").length <= elastic.cap;
     lastLayoutMs = Math.round(performance.now() - t);
     window.__tmDebug.lastLayoutMs = lastLayoutMs; window.__tmDebug.nodes = n; window.__tmDebug.edges = cy.edges().length;
     syncControls(); S.focusId = null; renderLegend(); layoutLabels(); showSummary();
   }
+
+  // ---- elastic drag ---------------------------------------------------------------------------------------------------------------
+  // Method: position-based dynamics (own code, no library): every edge is a spring whose rest length is its length at the moment of the grab;
+  // each animation frame the springs are relaxed in place (Gauss-Seidel, stiffness K) with Verlet inertia and damping, so neighbours follow the
+  // dragged node, overshoot a little, and settle after release. Hubs are heavier than leaves, and every node is pulled very gently back toward where it was at the grab, so the pull fades with distance. It only runs when the visible graph has at most
+  // ELASTIC_CAP nodes; above that, dragging moves a single node as before. Positions are never re-laid out: the one-shot cose layout is untouched.
+  const ELASTIC_CAP = 350, K = 0.25, DAMP = 0.82, HOME = 0.015, SETTLE = 0.2;
+  const elastic = { on: false, cap: ELASTIC_CAP, run: null, last: null };
+  function stopElastic() { if (elastic.run) { cancelAnimationFrame(elastic.run.raf); elastic.run = null; } }
+  function startElastic(grabbed) {
+    stopElastic();
+    if (!elastic.on || grabbed.hasClass('cluster')) return;
+    const nodes = cy.nodes().not('.cluster').toArray(), idx = new Map(nodes.map((n, i) => [n.id(), i])), N = nodes.length;
+    const x = new Float64Array(N), y = new Float64Array(N), hx = new Float64Array(N), hy = new Float64Array(N), px = new Float64Array(N), py = new Float64Array(N), deg = new Int32Array(N);
+    nodes.forEach((n, i) => { const p = n.position(); x[i] = px[i] = hx[i] = p.x; y[i] = py[i] = hy[i] = p.y; });
+    const E = [];
+    cy.edges().forEach((e) => { const a = idx.get(e.source().id()), b = idx.get(e.target().id()); if (a === undefined || b === undefined || a === b) return;
+      E.push([a, b, Math.max(Math.hypot(x[a] - x[b], y[a] - y[b]), 6)]); deg[a]++; deg[b]++; });
+    const w = Float64Array.from(deg, (d) => 1 / (1 + 0.12 * d));
+    const run = elastic.run = { raf: 0, grabbed: idx.get(grabbed.id()), held: true, calm: 0, frames: 0, t0: performance.now(), stepMs: 0, maxStepMs: 0, N, E: E.length };
+    const frame = () => {
+      const t = performance.now();
+      const g = run.grabbed;   // the dragged node stays pinned where the mouse put it, also after release; its neighbours settle around it
+      if (run.held) { const p = nodes[g].position(); x[g] = p.x; y[g] = p.y; }; px[g] = x[g]; py[g] = y[g];
+      let moved = 0;
+      for (let i = 0; i < N; i++) { if (i === g) continue; const vx = (x[i] - px[i]) * DAMP, vy = (y[i] - py[i]) * DAMP; px[i] = x[i]; py[i] = y[i]; x[i] += vx; y[i] += vy; }
+      for (let k = 0; k < E.length; k++) {
+        const e = E[k], a = e[0], b = e[1]; let dx = x[b] - x[a], dy = y[b] - y[a]; const d = Math.hypot(dx, dy) || 1e-6, err = (d - e[2]) / d * K;
+        const wa = a === g ? 0 : w[a], wb = b === g ? 0 : w[b], ws = wa + wb; if (ws === 0) continue;
+        dx *= err; dy *= err; x[a] += dx * wa / ws; y[a] += dy * wa / ws; x[b] -= dx * wb / ws; y[b] -= dy * wb / ws;
+      }
+      for (let i = 0; i < N; i++) if (i !== g) { x[i] += (hx[i] - x[i]) * HOME; y[i] += (hy[i] - y[i]) * HOME; }   // weak pull home: the far field barely follows
+      for (let i = 0; i < N; i++) if (i !== g) moved = Math.max(moved, Math.abs(x[i] - px[i]) + Math.abs(y[i] - py[i]));
+      cy.batch(() => { for (let i = 0; i < N; i++) if (i !== g) nodes[i].position({ x: x[i], y: y[i] }); });
+      run.frames++; const ms = performance.now() - t; run.stepMs += ms; run.maxStepMs = Math.max(run.maxStepMs, ms);
+      run.calm = !run.held && moved < SETTLE ? run.calm + 1 : 0;
+      if (run.calm > 6 || (!run.held && run.frames > 240)) { finishElastic(); return; }
+      run.raf = requestAnimationFrame(frame);
+    };
+    run.raf = requestAnimationFrame(frame);
+  }
+  function finishElastic() {
+    const r = elastic.run; if (!r) return;
+    const secs = (performance.now() - r.t0) / 1000;
+    elastic.last = { nodes: r.N, springs: r.E, frames: r.frames, seconds: +secs.toFixed(2), fps: +(r.frames / secs).toFixed(1), stepMsAvg: +(r.stepMs / r.frames).toFixed(2), stepMsMax: +r.maxStepMs.toFixed(2) };
+    elastic.run = null; scheduleLabels();
+  }
+  cy.on('grab', 'node', (e) => { if (!dragging) { dragging = true; tip.style.display = 'none'; clearHover(); } startElastic(e.target); });
+  cy.on('free', 'node', () => { dragging = false; if (elastic.run) elastic.run.held = false; });
+  window.__tmDebug.elastic = elastic;
 
   function syncControls() {
     $$('.seg button').forEach((b) => b.classList.toggle('on', b.dataset.view === S.view));
@@ -191,7 +258,8 @@ export default function (component) {
   function showSummary() {
     const n = cy.nodes('.user').length;
     panel.innerHTML = `<h3>${S.view === 'week' ? 'Flagged user-weeks' : 'Campaign view'}</h3><p class="sub">${S.view === 'week' ? `${n} flagged user-weeks in calendar week ${S.week} (${cal[calIdx[S.week]].d}); ${cy.nodes().length - n} neighbours shown` + (window.__tmDebug.hidden ? `, ${window.__tmDebug.hidden} links to unshared websites/contacts hidden (tick "All neighbours" to show them).` : '.') : `${n} flagged users linked through websites, PCs and email shared by at least two of them; communities are found with Louvain (weak structure when modularity is low).`}</p>
-      <p class="hint">Click a node to focus it and see the evidence. Drag nodes to rearrange. Scroll to zoom.</p>` + (() => { const st = window.__tmDebug.labelStats(); return st.hidden ? `<p class="hint">${st.hidden} labels are hidden to keep the text readable (${st.usersHidden} of ${st.users} people). Zoom in, hover, or click a dot to see its name.</p>` : ''; })() + (evalOn ? `<p class="hint ev">EVALUATION VIEW: a double ring marks true insiders. Analysts never see this.</p>` : '');
+      <p class="hint">Click a node to focus it and see the evidence. Hover to light up a node and its direct links. Scroll to zoom.</p>
+      <p class="hint">${elastic.on ? `Elastic drag is on: dragging a node pulls the nodes linked to it along, and they settle when you let go (used when the map shows at most ${ELASTIC_CAP} nodes; this one shows ${cy.nodes().not('.cluster').length}).` : `Elastic drag is off: this map shows ${cy.nodes().not('.cluster').length} nodes, more than the ${ELASTIC_CAP}-node limit, so dragging moves one node at a time.`}</p>` + (() => { const st = window.__tmDebug.labelStats(); return st.hidden ? `<p class="hint">${st.hidden} labels are hidden to keep the text readable (${st.usersHidden} of ${st.users} people). Zoom in, hover, or click a dot to see its name.</p>` : ''; })() + (evalOn ? `<p class="hint ev">EVALUATION VIEW: a double ring marks true insiders. Analysts never see this.</p>` : '');
   }
   function userPanel(r, ele) {
     const nb = ele.neighborhood('node'), sites = nb.filter((n) => n.hasClass('site')), cats = sites.filter((n) => n.hasClass('cat')), pcs = nb.filter((n) => n.hasClass('pc')), con = nb.filter((n) => n.hasClass('contact')), usr = nb.filter((n) => n.hasClass('user'));
@@ -233,16 +301,33 @@ export default function (component) {
   cy.on('tap', (e) => { if (e.target === cy) focus(null); });
   panel.addEventListener('click', (e) => { const b = e.target.closest('.open'); if (b) setTriggerValue('open', { user: b.dataset.user, week: b.dataset.week, ts: Date.now() }); });
 
-  // ---- hover tooltip ---------------------------------------------------------------------------
+  // ---- hover: soft highlight (never dims anything, never moves anything) + tooltip with the top reason / a short description ------------
+  const clearHover = () => cy.elements('.hov, .hovn, .hove').removeClass('hov hovn hove');
+  const topReason = (rec) => { if (!rec) return ''; const k = rec.c.reduce((b, v, i) => (v > rec.c[b] ? i : b), 0);
+    return rec.c[k] > 0 ? `Top reason: ${esc(M.groups[k])} (+${rec.c[k].toFixed(2)} log-odds)` : 'Top reason: nothing stands out'; };
+  let uwByKey = null;
+  const bestWeekRec = (u) => { uwByKey = uwByKey || new Map(P.uw.map((r) => [r.u + '|' + r.d, r])); return uwByKey.get(u.u + '|' + u.bd); };
+  const plural = (k, w) => `${k} flagged user${k === 1 ? '' : 's'}${w}`;
+  function tipHtml(n) {
+    if (n.data('kind') === 'user') {
+      if (S.view === 'week') { const r = P.uw[n.data('i')]; return `<b>${esc(r.u)}</b><br>${LV[r.lvl]} · percentile ${r.p.toFixed(2)}<br>${r.d}<br><span class="why">${topReason(r)}</span>`; }
+      const r = P.campaign.users[n.data('idx')]; return `<b>${esc(r.u)}</b><br>${LV[r.lvl]} · percentile ${r.p.toFixed(2)}<br>${r.wk} flagged weeks<br><span class="why">${topReason(bestWeekRec(r)).replace('Top reason', 'Top reason (best week)')}</span>`;
+    }
+    const c = (S.view === 'week' ? P.conn : P.campaign.conn)[n.data('ci')], k = n.neighborhood('node.user').length, where = S.view === 'week' ? ' this week' : ' overall';
+    const link = S.view === 'week' ? plural(k, where) : plural(c.deg, where);
+    const what = c.k === 'pc' ? `PC logged on to by ${link}${n.hasClass('solo') ? ' (nobody else that week)' : ''}`
+      : c.k === 'contact' ? `Email contact reached by ${link}`
+      : c.cat ? `Website in the “${catNames[c.cat]}” watch category, visited by ${link}` : `Website visited by ${link}`;
+    return `<b>${esc(c.n)}</b><br><span class="why">${what}</span>`;
+  }
   cy.on('mouseover', 'node', (e) => {
-    const n = e.target; if (n.hasClass('cluster')) return;
-    let h;
-    if (n.data('kind') === 'user') { const r = S.view === 'week' ? P.uw[n.data('i')] : P.campaign.users[n.data('idx')]; h = `<b>${esc(r.u)}</b><br>${LV[r.lvl]} · percentile ${r.p.toFixed(2)}${S.view === 'campaign' ? `<br>${r.wk} flagged weeks` : '<br>' + r.d}`; }
-    else { const c = (S.view === 'week' ? P.conn : P.campaign.conn)[n.data('ci')]; h = `<b>${esc(c.n)}</b><br>${c.cat ? esc(catNames[c.cat]) + ' (named-site category)' : c.k === 'pc' ? 'PC' : c.k === 'domain' ? 'website' : 'email contact'}`; }
-    tip.innerHTML = h; tip.style.display = 'block'; n.addClass('labeled lblforce');
+    const n = e.target; if (n.hasClass('cluster') || dragging) return;
+    tip.innerHTML = tipHtml(n); tip.style.display = 'block'; n.addClass('labeled lblforce');
+    clearHover(); n.addClass('hov'); n.connectedEdges().addClass('hove'); n.neighborhood('node').not('.cluster').addClass('hovn');
   });
-  cy.on('mousemove', (e) => { if (e.originalEvent) { const r = canvas.getBoundingClientRect(); tip.style.left = Math.min(e.originalEvent.clientX - r.left + 14, r.width - 190) + 'px'; tip.style.top = (e.originalEvent.clientY - r.top + 14) + 'px'; } });
-  cy.on('mouseout', 'node', (e) => { tip.style.display = 'none'; const n = e.target; n.removeClass('lblforce'); if (!n.hasClass('user') && !n.hasClass('cat') && !n.hasClass('shared') && !n.hasClass('tmplbl')) n.removeClass('labeled'); });
+  canvas.addEventListener('mouseleave', () => { if (!dragging) { tip.style.display = 'none'; clearHover(); cy.nodes('.lblforce').removeClass('lblforce'); } });   // pointer left the graph without a node mouseout
+  cy.on('mousemove', (e) => { if (e.originalEvent && !dragging) { const r = canvas.getBoundingClientRect(); tip.style.left = Math.min(e.originalEvent.clientX - r.left + 14, r.width - 230) + 'px'; tip.style.top = (e.originalEvent.clientY - r.top + 14) + 'px'; } });
+  cy.on('mouseout', 'node', (e) => { tip.style.display = 'none'; clearHover(); const n = e.target; n.removeClass('lblforce'); if (!n.hasClass('user') && !n.hasClass('cat') && !n.hasClass('shared') && !n.hasClass('tmplbl')) n.removeClass('labeled'); });
 
   // ---- controls --------------------------------------------------------------------------------
   const go = (d) => { const i = Math.min(Math.max(calIdx[S.week] + d, 0), cal.length - 1); S.week = cal[i].cw; draw(); };
@@ -271,5 +356,5 @@ export default function (component) {
 
   draw();
   if (data.focus) { const f = P.uw.filter((r) => r.u === data.focus.user).sort((a, b) => Math.abs(new Date(a.d) - new Date(data.focus.week)) - Math.abs(new Date(b.d) - new Date(data.focus.week)))[0]; if (f) { S.week = f.cw; S.minLvl = 0; S.view = 'week'; draw(); focus(cy.getElementById('u' + f.i)); } }
-  return () => { stopPlay(); try { cy.destroy(); } catch (e) {} };
+  return () => { stopPlay(); stopElastic(); ro.disconnect(); document.removeEventListener('scroll', inv, passive); window.removeEventListener('resize', inv, passive); try { cy.destroy(); } catch (e) { /* already gone */ } };
 }
