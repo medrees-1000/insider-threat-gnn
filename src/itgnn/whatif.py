@@ -143,10 +143,43 @@ def range_warnings(meta, feats, keys):
     return out
 
 
+def slider_max(meta, knob, baseline=None, floor=5):
+    """Slider range cap: about the 99th percentile of the feature in real weeks (at least `floor`, and at least the starting week's own value).
+    Larger values stay available in the advanced editor, with the out-of-range warning."""
+    top = max(floor, int(np.ceil(meta["p99"][knob])))
+    return int(max(top, np.ceil(baseline[knob]))) if baseline is not None else top
+
+
+def logit(p):
+    p = np.clip(np.asarray(p, dtype=float), 1e-9, 1 - 1e-9)
+    return np.log(p / (1 - p))
+
+
+def knob_effects(models, meta, baseline, current, overrides=None, knobs=None):
+    """Label-free effect of each knob on the main model: the spread (max - min) of the log-odds score as that knob sweeps its range, everything
+    else held at `current`. Returns a DataFrame (knob, effect) sorted from the largest effect."""
+    rows = []
+    for k in knobs or (SLIDERS + ADVANCED_KNOBS):
+        sw = sweep(models, meta, baseline, current, k, n=40, overrides={a: b for a, b in (overrides or {}).items() if a not in (k, f"dev_{k}")})
+        z = logit(sw["score"])
+        rows.append({"knob": k, "effect": float(z.max() - z.min())})
+    return pd.DataFrame(rows).sort_values("effect", ascending=False).reset_index(drop=True)
+
+
+def first_crossing(sw, cutoff, current_value, current_score):
+    """Where the verdict flips at one budget cut-off, from the sweep predictions: ('up', v) = would become an alert once the knob reaches v;
+    ('down', v) = stops being an alert once it falls below v; (None) = never flips within the knob's range."""
+    if current_score < cutoff:
+        above = sw[(sw["value"] >= current_value) & (sw["score"] >= cutoff)]
+        return ("up", float(above["value"].iloc[0])) if len(above) else None
+    below = sw[(sw["value"] <= current_value) & (sw["score"] < cutoff)]
+    return ("down", float(below["value"].iloc[-1])) if len(below) else None
+
+
 def sweep(models, meta, baseline, current, knob, n=50, overrides=None):
     """Score and risk percentile as ONE knob sweeps 0..its maximum, everything else held at its current value. Computed live from the models."""
     vmax = meta["knob_max"][knob]
-    vals = np.unique(np.round(np.linspace(0, vmax, n)))
+    vals = np.unique(np.round(np.linspace(0, vmax, min(n, int(vmax) + 1))))
     rows = []
     for v in vals:
         cur = dict(current); cur[knob] = v

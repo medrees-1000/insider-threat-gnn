@@ -70,3 +70,18 @@ def test_ui_modules_do_not_train_or_write():
                 if name == "open" and isinstance(node.func, ast.Name):   # reading is fine; writing (mode w/a/x) is not
                     mode = [a.value for a in node.args[1:2] if isinstance(a, ast.Constant)] + [k.value.value for k in node.keywords if k.arg == "mode" and isinstance(k.value, ast.Constant)]
                     assert not any(set(str(m)) & set("wax+") for m in mode), (f, mode)
+
+
+def test_percentiles_alert_frame_and_reasons(ui_results):
+    sp = U.with_percentiles(U.load_scores(ui_results))
+    assert sp["pct"].between(0, 100).all() and sp["pct"].iloc[sp["score"].argmax()] == 100 and sp["pct"].iloc[sp["score"].argmin()] < 5
+    assert (np.sign(sp["z"].diff().fillna(0)) == np.sign(sp["score"].diff().fillna(0))).mean() > 0.9     # log-odds order follows the score
+    top = U.rank_alerts(sp, 25)
+    for display, col in (("Percentile", "pct"), ("Log-odds", "z"), ("Raw score", "score")):
+        t = U.alerts_frame(top, display)
+        assert list(t.columns) == ["Person", "Week", "Risk", "Without named sites", "Why"] and len(t) == len(top)
+        assert np.allclose(t["Risk"], top[col].round(4 if display == "Raw score" else 2))
+    assert "Spread over 5 repeats" in U.alerts_frame(top, "Percentile", show_sd=True).columns
+    why = U.alerts_frame(top)["Why"].iloc[0]
+    assert 1 <= len(why) <= 2 and all(isinstance(x, str) for x in why)
+    assert not any("label" in c.lower() or "truth" in c.lower() for c in U.alerts_frame(top).columns)      # the default table carries no label columns

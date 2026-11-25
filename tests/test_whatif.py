@@ -98,3 +98,22 @@ def test_aggregate_files_have_no_per_row_fields(ui_results_full):
         p = Path("results") / f
         if p.exists():
             assert_aggregates_only(json.load(open(p)))
+
+
+def test_slider_caps_effects_and_crossing(ui_results_full):
+    meta = json.load(open(ui_results_full / "final_model_meta.json")); models = W.load_models(ui_results_full)
+    base = W.median_baseline(meta)
+    for k in W.SLIDERS:
+        cap = W.slider_max(meta, k, base)
+        assert cap >= 5 and cap >= int(np.ceil(meta["p99"][k])) and cap < meta["knob_max"][k] + 1       # near the 99th percentile, not the 3x sweep range
+    assert W.slider_max(meta, "n_file", {**base, "n_file": 500.0}) == 500                                  # a starting week above the cap is never cut off
+    cur = {k: base[k] for k in W.SLIDERS + W.ADVANCED_KNOBS}
+    eff = W.knob_effects(models, meta, base, cur)
+    assert eff["effect"].is_monotonic_decreasing and set(eff["knob"]) == set(W.SLIDERS + W.ADVANCED_KNOBS)
+    top = eff["knob"].iloc[0]
+    sw = W.sweep(models, meta, base, cur, top, n=40)                                                       # the same 40-point sweep the ranking uses
+    z = W.logit(sw["score"]); assert abs((z.max() - z.min()) - eff["effect"].iloc[0]) < 1e-9                # the ranking rule is exactly the log-odds spread
+    df = pd.DataFrame({"value": [0.0, 1, 2, 3, 4, 5], "score": [0.01, 0.02, 0.2, 0.6, 0.7, 0.8]})
+    assert W.first_crossing(df, 0.5, 0.0, 0.01) == ("up", 3.0)                 # needs to reach 3 to cross the cut-off
+    assert W.first_crossing(df, 0.5, 5.0, 0.8) == ("down", 2.0)                # stops being an alert below 3 (the last value under the cut-off is 2)
+    assert W.first_crossing(df, 0.99, 0.0, 0.01) is None                       # never flips within the range

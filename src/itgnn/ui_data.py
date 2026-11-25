@@ -135,7 +135,7 @@ def limitations(m):
         f"Cold start: with a training period that holds few attacks the model is weak. At the earliest cutoff (T=29, {ts[(29, 'W2+E+H')]['train_attack_weeks']} training attack weeks) "
         f"the time-split PR-AUC is {ts[(29, 'W2+E+H')]['pr_auc']:.2f} against {ts[(29, 'W2+E+H')]['user_split_same_rows']:.2f} under user-split CV on the same weeks.",
         "Evaluation protocol: the scores shown are out-of-fold from 5x5 user-split CV (no row is scored by a model that saw its user); they are averaged over the 5 repeats, which is not what one deployed model would output.",
-        "A global top-q% is easier than a real weekly queue (see the table above): a weekly queue of the same size is less precise.",
+        "A global top-q% is easier than a real weekly queue (see the first table under 'All the numbers' below): a weekly queue of the same size is less precise.",
         "Labels are noisy: any week overlapping an attack window counts as an attack week, and most windows are longer than 30 days.",
         "The first four active weeks of each user are not scored (history needs four weeks).",
         "Explanations are XGBoost TreeSHAP contributions grouped into feature groups: they show what pushed a score up, not why someone is malicious; correlated features share credit.",
@@ -163,3 +163,34 @@ def assert_aggregates_only(obj, path="$", max_list=64):
             assert_aggregates_only(v, f"{path}[{i}]", max_list)
     elif isinstance(obj, str) and re.fullmatch(r"[A-Z]{3}\d{4}", obj):
         raise AssertionError(f"{path}: looks like a user id ({obj})")
+
+
+GROUP_SHORT = {"w2_base": "everyday activity", "w2_hist_dev": "change from their usual", "email_volume": "email volume", "email_recipients": "who they emailed",
+               "web_volume": "web browsing", "web_domains": "variety of sites", "web_after_hours": "after-hours browsing", "named_site": "named-site visits", "first_seen": "new things"}
+DISPLAYS = ["Percentile", "Log-odds", "Raw score"]
+
+
+def with_percentiles(scores):
+    """Adds pct / pct_g (rank percentile 0-100 of the score among ALL scored weeks) and z / z_g (log-odds) for the final and the no-named-site score."""
+    s = scores.copy()
+    for col, p, z in (("score", "pct", "z"), ("score_generic", "pct_g", "z_g")):
+        s[p] = s[col].rank(pct=True) * 100
+        v = s[col].to_numpy(float).clip(1e-6, 1 - 1e-6)
+        s[z] = np.log(v / (1 - v))
+    return s
+
+
+def reasons(row, k=2):
+    """The k kinds of behaviour pushing this week's score up the most, in plain words (positive contributions only)."""
+    top = sorted(((GROUP_SHORT[c], float(row[c])) for c in GROUP_SHORT), key=lambda t: -t[1])[:k]
+    return [f"{n} +{v:.1f}" for n, v in top if v > 0] or ["nothing stands out"]
+
+
+def alerts_frame(alerts, display="Percentile", show_sd=False):
+    """Compact alert table: person, week, the chosen risk display (+ the no-named-site version), the top two reasons, optional spread."""
+    col, colg = {"Percentile": ("pct", "pct_g"), "Log-odds": ("z", "z_g"), "Raw score": ("score", "score_generic")}[display]
+    t = pd.DataFrame({"Person": alerts["user"], "Week": alerts["week_start"], "Risk": alerts[col].round(4 if display == "Raw score" else 2),
+                      "Without named sites": alerts[colg].round(4 if display == "Raw score" else 2), "Why": [reasons(r) for _, r in alerts.iterrows()]})
+    if show_sd:
+        t["Spread over 5 repeats"] = alerts["score_sd"].round(4)
+    return t

@@ -33,6 +33,11 @@ def _scores(path):
 
 
 @st.cache_data
+def _scores_p(path):
+    return U.with_percentiles(U.load_scores(path))
+
+
+@st.cache_data
 def _weeks(path):
     return pd.read_parquet(Path(path) / "ui_weeks.parquet")
 
@@ -78,6 +83,14 @@ scores, weeks, metrics = _scores(RESULTS), _weeks(RESULTS), _metrics(RESULTS)
 source, backend_note = _source(RESULTS)
 mode = getattr(st.context.theme, "type", None) or "dark"
 PAL = theme_for(mode)
+
+st.markdown(f"""<style>
+.st-key-wi_row [data-testid="stHorizontalBlock"] {{ align-items: stretch !important; }}
+.st-key-wi_row [data-testid="stColumn"] {{ align-self: stretch; }}
+.st-key-wi_row [data-testid="stColumn"] > [data-testid="stVerticalBlock"] {{ height: 100%; }}
+[data-testid="stLayoutWrapper"]:has(> .st-key-wi_rating) {{ position: sticky; top: 3.75rem; z-index: 30; background: {PAL['page']}; padding-bottom: 0.4rem; }}
+[data-testid="stMetricValue"] {{ font-variant-numeric: tabular-nums; }}
+</style>""", unsafe_allow_html=True)
 
 # ---- navigation and shared selection -----------------------------------------------------------
 if "sel_user" not in st.session_state:
@@ -210,63 +223,93 @@ def page_map():
 
 
 def page_alerts():
-    alerts = U.rank_alerts(scores, q, wk)
+    sp = _scores_p(RESULTS)
+    alerts = U.rank_alerts(sp, q, wk)
     scope = "all weeks" if wk is None else f"calendar week {int(wk)}"
-    st.subheader(f"Top {q}% of weeks ({scope}): {len(alerts):,} alerts, {alerts['user'].nunique()} distinct users")
-    if wk is None:
-        st.caption("Ranked globally over every scored user-week, which matches the reported metrics. A global top-q% is easier than a real weekly queue: pick a calendar week in the sidebar to see one.")
+    st.subheader(f"Top {q}% of weeks ({scope})")
     if not len(alerts):
         st.info("No scored weeks for this selection."); return
-    t = U.alert_table(alerts)
+    g = metrics["ui_global_lists"][str(q)] if wk is None else None
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Alerts", f"{len(alerts):,}")
+    k2.metric("Different people", f"{alerts['user'].nunique()}")
+    k3.metric("Expected real attack weeks", f"{g['week precision']:.0%}" if g else "n/a", "measured on evaluation data" if g else "all-weeks lists only", delta_color="off")
+    k4.metric("Insiders caught (of 70)", f"{g['insiders caught']}" if g else "n/a", "global list, evaluation data" if g else None, delta_color="off")
+    if wk is None:
+        st.caption("This is a global top-q% list over the whole period, which matches the reported results and is easier than a real weekly queue: pick a calendar week in the sidebar to see a weekly queue.")
+    c1, c2 = st.columns([2, 1])
+    display = c1.radio("Show risk as", U.DISPLAYS, horizontal=True, key="al_display", help="Raw scores of the top rows all read 0.9999, so the default is the percentile (how many weeks score lower).")
+    show_sd = c2.checkbox("Show spread over the 5 repeats", value=False)
+    t = U.alerts_frame(alerts, display, show_sd)
     if ev is not None:
-        t = t.merge(ev[["user", "week_start", "label", "scenario"]].rename(columns={"label": "attack week (truth)", "scenario": "scenario (truth)"}), on=["user", "week_start"], how="left")
-    st.dataframe(t.rename(columns={"score": "score (W2+E+H)", "score_sd": "sd over 5 repeats", "score_generic": "score (generic features)"}),
-                 hide_index=True, width="stretch", column_config={"week_start": st.column_config.DateColumn("week", format="YYYY-MM-DD")})
-    st.caption("The generic score uses no named-site (category-domain) features, so it shows the evidence that does not rely on the near-label markers.")
-    i = st.selectbox("Open an alert", range(len(alerts)), format_func=lambda i: f"{alerts.loc[i, 'user']}  {alerts.loc[i, 'week_start']:%Y-%m-%d}  score {alerts.loc[i, 'score']:.3f}")
-    u, w = alerts.loc[i, "user"], alerts.loc[i, "week_start"]
+        t = t.merge(ev[["user", "week_start", "label", "scenario"]].rename(columns={"user": "Person", "week_start": "Week", "label": "Attack week (truth)", "scenario": "Scenario (truth)"}), on=["Person", "Week"], how="left")
+    lo, hi = {"Percentile": (float(t["Risk"].min()) - 0.05, 100.0), "Log-odds": (float(t["Risk"].min()) - 0.5, float(t["Risk"].max()) + 0.5), "Raw score": (0.0, 1.0)}[display]
+    fmt = {"Percentile": "%.2f", "Log-odds": "%.1f", "Raw score": "%.4f"}[display]
+    cfg = {"Week": st.column_config.DateColumn("Week", format="YYYY-MM-DD"), "Risk": st.column_config.ProgressColumn("Risk (final model)", format=fmt, min_value=lo, max_value=hi),
+           "Without named sites": st.column_config.NumberColumn("Without named sites", format=fmt, help="Rating from features that do not use the named-site (leak, job, cloud, keylogger, competitor) categories."),
+           "Why": st.column_config.ListColumn("Main reasons (push up)")}
+    event = st.dataframe(t, hide_index=True, width="stretch", column_config=cfg, on_select="rerun", selection_mode="single-row", key="al_tbl", height=min(35 * (len(t) + 1) + 3, 520))
+    st.caption("**How to read this:** each row is one person in one week. The bar shows how risky the model rated that week (a fuller bar is riskier; in percentile mode it is the share of all weeks that scored lower). "
+               "'Without named sites' is the same rating with the near-label named-site features removed. 'Main reasons' are the two kinds of behaviour that pushed the score up the most. Click a row to select it.")
+    rows = event.selection.rows if event is not None and event.selection else []
+    i = rows[0] if rows else 0
+    if not rows:
+        st.caption("No row selected: the buttons act on the top alert.")
+    u, w = alerts.iloc[i]["user"], alerts.iloc[i]["week_start"]
     st.session_state.sel_user, st.session_state.sel_week = u, w
+    st.markdown(f"**Selected:** {u}, week of {w:%Y-%m-%d}")
     a, b, _ = st.columns([1, 1, 4])
     a.button("Open in Investigate", on_click=goto, args=("Investigate", u, w))
     b.button("Open in Threat map", on_click=goto, args=("Threat map", u, w))
 
 
 def page_investigate():
+    sp = _scores_p(RESULTS)
     users = sorted(scores["user"].unique())
     su = st.session_state.sel_user
-    user = st.selectbox("User", users, index=users.index(su) if su in users else 0)
+    c0, c1 = st.columns(2)
+    user = c0.selectbox("Person", users, index=users.index(su) if su in users else 0)
     tl = U.user_timeline(scores, user)
     weeks_l = list(tl["week_start"])
     sw = st.session_state.sel_week
-    pick = st.selectbox("Week", weeks_l, index=weeks_l.index(sw) if (su == user and sw in weeks_l) else len(weeks_l) - 1, format_func=lambda d: f"{d:%Y-%m-%d}")
+    pick = c1.selectbox("Week", weeks_l, index=weeks_l.index(sw) if (su == user and sw in weeks_l) else len(weeks_l) - 1, format_func=lambda d: f"{d:%Y-%m-%d}")
     row = scores[(scores["user"] == user) & (scores["week_start"] == pick)].iloc[0]
+    prow = sp[(sp["user"] == user) & (sp["week_start"] == pick)].iloc[0]
     cuts = U.budget_cutoffs(scores)
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Score (W2+E+H)", f"{row['score']:.3f}", f"sd {row['score_sd']:.3f} over 5 repeats", delta_color="off")
-    c2.metric("Score (generic features)", f"{row['score_generic']:.3f}")
-    c3.metric("Within the top", next((f"{b}%" for b in U.BUDGETS if row["score"] >= cuts[b]), "more than 2% of weeks (not alerted)"))
-    long = pd.concat([tl.assign(series="W2+E+H score")[["week_start", "score", "series"]], tl.assign(series="generic-feature score", score=tl["score_generic"])[["week_start", "score", "series"]]])
-    colour = alt.Color("series:N", scale=alt.Scale(domain=["W2+E+H score", "generic-feature score"], range=[PAL["accent"], PAL["muted"]]), legend=alt.Legend(title=None, orient="top"))
-    base = alt.Chart(long).encode(x=alt.X("week_start:T", title="week"), y=alt.Y("score:Q", scale=alt.Scale(domain=[0, 1]), title="score (out-of-fold, mean of 5 repeats)"))
-    layers = [base.mark_line(strokeWidth=2).encode(color=colour), base.mark_point(size=28, filled=True).encode(color=colour)]
-    cut = pd.DataFrame({"cutoff": list(cuts.values()), "budget": [f"top {b}%" for b in cuts]})
-    layers.append(alt.Chart(cut).mark_rule(strokeDash=[4, 4], color=PAL["muted"]).encode(y="cutoff:Q", tooltip=["budget", "cutoff"]))
-    layers.append(alt.Chart(pd.DataFrame({"week_start": [pick], "score": [row["score"]]})).mark_point(size=160, color=PAL["text"], filled=False, strokeWidth=2).encode(x="week_start:T", y="score:Q"))
+    c1_, c2_, c3_ = st.columns(3)
+    c1_.metric("Risk percentile", f"{prow['pct']:.2f}", f"score {row['score']:.4f} ± {row['score_sd']:.4f}", delta_color="off")
+    c2_.metric("Without named sites", f"{prow['pct_g']:.2f}", f"score {row['score_generic']:.4f}", delta_color="off")
+    c3_.metric("Alert level", next((f"top {b}%" for b in U.BUDGETS if row["score"] >= cuts[b]), "not an alert"))
+    st.subheader("This person over time")
+    long = pd.concat([tl.assign(series="Final model")[["week_start", "score", "series"]], tl.assign(series="Without named sites", score=tl["score_generic"])[["week_start", "score", "series"]]])
+    colour = alt.Color("series:N", scale=alt.Scale(domain=["Final model", "Without named sites"], range=[PAL["accent"], PAL["muted"]]), legend=alt.Legend(title=None, orient="top"))
+    y = alt.Y("score:Q", scale=alt.Scale(domain=[0, 1], clamp=True, nice=False), title="Risk score (0 = lowest, 1 = highest)")
+    x = alt.X("week_start:T", title="Week")
+    edges = [0.0] + [cuts[b] for b in sorted(cuts, reverse=True)][::-1] + [1.0]
+    bands = pd.DataFrame({"lo": [cuts[2.0], cuts[1.0], cuts[0.5], cuts[0.25]], "hi": [cuts[1.0], cuts[0.5], cuts[0.25], 1.0], "level": ["top 2%", "top 1%", "top 0.5%", "top 0.25%"], "i": [0, 1, 2, 3]})
+    band_layer = alt.Chart(bands).mark_rect(opacity=0.14).encode(y=alt.Y("lo:Q", scale=alt.Scale(domain=[0, 1], clamp=True, nice=False)), y2="hi:Q", color=alt.Color("level:N", scale=alt.Scale(domain=list(bands["level"]), range=PAL["risk"]), legend=None))
+    lab = alt.Chart(bands.assign(x=tl["week_start"].max())).mark_text(align="right", dx=-4, dy=-6, color=PAL["text2"], fontSize=11).encode(x="x:T", y=alt.Y("lo:Q", scale=alt.Scale(domain=[0, 1], clamp=True, nice=False)), text="level:N")
+    lines = alt.Chart(long).mark_line(interpolate="linear", strokeWidth=2, clip=True).encode(x=x, y=y, color=colour)
+    dots = alt.Chart(long).mark_point(filled=True, size=26, clip=True).encode(x=x, y=y, color=alt.Color("series:N", scale=alt.Scale(domain=["Final model", "Without named sites"], range=[PAL["accent"], PAL["muted"]]), legend=None))
+    sel = alt.Chart(pd.DataFrame({"week_start": [pick], "score": [row["score"]]})).mark_point(size=170, color=PAL["text"], filled=False, strokeWidth=2).encode(x="week_start:T", y=alt.Y("score:Q", scale=alt.Scale(domain=[0, 1], clamp=True, nice=False)))
+    layers = [band_layer, lines, dots, lab, sel]
     if ev is not None:
         e = ev[ev["user"] == user]
         if e["window_start"].notna().any():
-            layers.insert(0, alt.Chart(pd.DataFrame({"s": [e["window_start"].iloc[0]], "e": [e["window_end"].iloc[0]]})).mark_rect(color=PAL["risk"][3], opacity=0.15).encode(x="s:T", x2="e:T"))
-            st.error(f"EVALUATION VIEW: shaded band = true attack window {e['window_start'].iloc[0]:%Y-%m-%d} to {e['window_end'].iloc[0]:%Y-%m-%d} (scenario {int(e['scenario'].iloc[0])}). Not available to analysts.")
+            layers.insert(0, alt.Chart(pd.DataFrame({"s": [e["window_start"].iloc[0]], "e": [e["window_end"].iloc[0]]})).mark_rect(color=PAL["text"], opacity=0.10).encode(x="s:T", x2="e:T"))
+            st.error(f"EVALUATION VIEW: the pale vertical band is the true attack window {e['window_start'].iloc[0]:%Y-%m-%d} to {e['window_end'].iloc[0]:%Y-%m-%d} (scenario {int(e['scenario'].iloc[0])}). Not available to analysts.")
         else:
-            st.error("EVALUATION VIEW: this user is not a listed insider.")
-    st.altair_chart(alt.layer(*layers).properties(height=320), width="stretch")
-    st.caption("Dashed lines: score cut-offs of the four global alert budgets. Weeks before a user's fifth active week are not scored.")
-    g = pd.DataFrame({"group": list(U.GROUP_COLS.values()), "contribution (log-odds)": [float(row[c]) for c in U.GROUP_COLS]})
-    st.subheader(f"Why this week scored as it did ({pick:%Y-%m-%d})")
-    st.altair_chart(alt.Chart(g).mark_bar().encode(y=alt.Y("group:N", sort="-x", title=None), x=alt.X("contribution (log-odds):Q"),
-                                                   color=alt.condition(alt.datum["contribution (log-odds)"] > 0, alt.value(PAL["positive"]), alt.value(PAL["negative"]))).properties(height=260), width="stretch")
-    st.caption(f"Positive bars push the score up. Baseline (bias) {float(row['bias']):+.2f} log-odds. XGBoost TreeSHAP contributions grouped into feature groups; not causal.")
-    st.button("Show this user in the Threat map", on_click=goto, args=("Threat map", user, pick))
+            st.error("EVALUATION VIEW: this person is not a listed insider.")
+    st.altair_chart(alt.layer(*layers).resolve_scale(color="independent").properties(height=330), width="stretch")
+    st.caption("**How to read this:** each dot is one week of this person; the line joins them in time and a higher dot means a riskier week. The coloured bands mark the alert levels: a dot inside a band would be an alert at that budget "
+               "(the top band is the strictest). The ringed dot is the week selected above. Weeks before a person's fifth active week are not scored.")
+    st.subheader(f"Why the week of {pick:%Y-%m-%d} scored as it did")
+    g = pd.DataFrame({"group": list(U.GROUP_COLS.values()), "contribution": [float(row[c]) for c in U.GROUP_COLS]})
+    st.altair_chart(alt.Chart(g).mark_bar().encode(y=alt.Y("group:N", sort="-x", title=None, axis=alt.Axis(labelLimit=230, labelOverlap=False)), x=alt.X("contribution:Q", title="Pushes the risk up (right) or down (left)"),
+                    color=alt.condition(alt.datum.contribution > 0, alt.value(PAL["positive"]), alt.value(PAL["negative"]))).properties(height=300), width="stretch")
+    st.caption("**How to read this:** each bar is one kind of behaviour. A bar to the right pushed this week's risk up, a bar to the left pulled it down, and a longer bar means a bigger push; the longest bar is what mattered most. "
+               f"The starting point before any behaviour is counted is {float(row['bias']):+.2f} on the model's log-odds scale. These are explanations of the score, not proof of why someone is risky.")
+    st.button("Show this person in the Threat map", on_click=goto, args=("Threat map", user, pick))
 
 
 def page_whatif():
@@ -286,104 +329,159 @@ def page_whatif():
         pick = st.selectbox("Flagged week", opts, format_func=lambda i: f"{rows.loc[i, 'user']}  {rows.loc[i, 'week_start']:%Y-%m-%d}", key="wi_pick")
         base, base_id = {c: float(rows.loc[pick, c]) for c in meta["features_main"]}, f"row{pick}"
         st.caption("This week is in the final model's own training data, so its score is optimistic compared with a week the model has never seen.")
+    smax = {k: W.slider_max(meta, k, base) for k in W.SLIDERS}
     if st.session_state.get("wi_base_id") != base_id:
         st.session_state["wi_base_id"] = base_id
         for k in W.SLIDERS:
-            st.session_state[f"wi_{k}"] = int(min(base[k], meta["knob_max"][k]))
+            st.session_state[f"wi_{k}"] = int(min(base[k], smax[k]))
     pre = W.presets({k: base[k] for k in W.SLIDERS})
 
     def apply_preset(vals):
         for k in W.SLIDERS:
-            st.session_state[f"wi_{k}"] = int(min(vals.get(k, base[k]), meta["knob_max"][k]))
+            st.session_state[f"wi_{k}"] = int(min(vals.get(k, base[k]), smax[k]))
     st.caption("One-click scenarios, written from the one-sentence scenario descriptions in the dataset (not from any insider's data). The numbers are illustrative multiples of the starting week.")
     pc = st.columns(len(pre))
     for col, (name, vals) in zip(pc, pre.items()):
         col.button(name, on_click=apply_preset, args=(vals,), width="stretch")
-    left, right = st.columns([1.15, 1])
-    with left:
-        cur = {}
-        for k in W.SLIDERS:
-            cur[k] = st.slider(W.LABELS[k], 0, meta["knob_max"][k], key=f"wi_{k}", help=f"A typical week has {typical[k]:g}; 99% of real weeks are at or below {meta['p99'][k]:g}.")
-    feats0, notes = W.rebuild(base, cur)
-    with left:
-        with st.expander("Advanced: every feature, exact entry"):
-            st.caption("Type any value to override it. 'Set by sliders' and 'Worked out' values follow the sliders until you type over them; 'Stays at the starting week' ones cannot be worked out from the sliders.")
-            kind = {}
-            for c in W.feature_columns():
-                b = c.replace("hist_mean_", "").replace("dev_", "")
-                kind[c] = ("Set by sliders" if c in cur else "Worked out" if c.startswith("dev_") and b not in W.FROZEN else "Typed here or starting week" if c in W.ADVANCED_KNOBS else
-                           "Stays at the starting week")
-            tbl = pd.DataFrame({"Feature": list(feats0), "Plain name": [W.LABELS.get(c.replace("hist_mean_", "").replace("dev_", ""), c) + (" (recent average)" if c.startswith("hist_mean_") else " (change vs recent average)" if c.startswith("dev_") else "") for c in feats0],
-                                "Value": [round(v, 4) for v in feats0.values()], "How it is set": [kind[c] for c in feats0], "Typical": [round(meta["medians"][c], 3) for c in feats0],
-                                "99th percentile": [round(meta["p99"][c], 3) for c in feats0]})
-            epoch = st.session_state.setdefault("wi_adv_epoch", 0)
-            st.button("Clear typed values", on_click=lambda: st.session_state.update(wi_adv_epoch=epoch + 1))
-            edited = st.data_editor(tbl, hide_index=True, disabled=["Feature", "Plain name", "How it is set", "Typical", "99th percentile"], key=f"wi_adv_{base_id}_{epoch}", height=300)
-    overrides = {r.Feature: float(r.Value) for r in edited.itertuples() if abs(float(r.Value) - round(feats0[r.Feature], 4)) > 1e-9}
-    feats, notes = W.rebuild(base, cur, overrides)
-    res = W.predict(models, meta, pd.DataFrame([feats]))
-    score, score_g = float(res["score"].iloc[0]), float(res["score_generic"].iloc[0])
-    pct, pct_g = W.percentile(meta, "score", score), W.percentile(meta, "score_generic", score_g)
-    v = W.verdict(meta, score)
-    with right:
-        with st.container(border=True):
-            st.caption("Risk rating of this week (final model)")
-            st.markdown(f"## Riskier than {pct:.2f}% of real weeks")
-            if v is not None:
-                st.success(f"Would be an alert at the {v:g}% budget (score {score:.4f}).")
-            else:
-                st.info(f"Would not be an alert at any budget up to 2% (score {score:.4f}).")
-            a, b = st.columns(2)
-            a.metric("All features: riskier than", f"{pct:.1f}%", f"of weeks · score {score:.4f}", delta_color="off")
-            b.metric("No named sites: riskier than", f"{pct_g:.1f}%", f"of weeks · score {score_g:.4f}", delta_color="off")
-        for n in notes:
-            st.info(n)
-        for w in W.range_warnings(meta, feats, list(cur) + [k for k in overrides if k in meta["p99"]]):
-            st.warning(w)
-        g = pd.DataFrame({"group": list(U.GROUP_COLS.values()), "contribution": [float(res[k].iloc[0]) for k in meta["groups"]]})
-        st.altair_chart(alt.Chart(g).mark_bar().encode(y=alt.Y("group:N", sort="-x", title=None, axis=alt.Axis(labelLimit=230, labelOverlap=False)), x=alt.X("contribution:Q", title="Pushes the risk up (right) or down (left)"),
-                        color=alt.condition(alt.datum.contribution > 0, alt.value(PAL["positive"]), alt.value(PAL["negative"]))).properties(height=330), width="stretch")
-        st.caption("**How to read this:** each bar is one kind of behaviour. A bar to the right pushed this week's risk up, a bar to the left pulled it down, and a longer bar means a bigger push. The longest bar is what moved this rating the most.")
-    st.caption("This rating is a ranking signal (how this week compares with real weeks), not the probability that someone is an insider. Named-site features (leak, keylogger, job, cloud and competitor sites) are close to label markers in this synthetic data, so look at the 'without named-site features' rating too. "
+    with st.container(key="wi_row"):
+        left, right = st.columns([1.15, 1])
+        with left:
+            cur = {}
+            for k in W.SLIDERS:
+                cur[k] = st.slider(W.LABELS[k], 0, smax[k], key=f"wi_{k}", help=f"A typical week has {typical[k]:g}; 99% of real weeks are at or below {meta['p99'][k]:g}. Larger values can be typed in the Advanced editor below.")
+            feats0, notes = W.rebuild(base, cur)
+            with st.expander("Advanced: every feature, exact entry (values beyond the sliders go here)"):
+                st.caption("Type any value to override it. 'Set by sliders' and 'Worked out' values follow the sliders until you type over them; 'Stays at the starting week' ones cannot be worked out from the sliders. Values far outside real weeks get a warning.")
+                kind = {}
+                for c in W.feature_columns():
+                    b = c.replace("hist_mean_", "").replace("dev_", "")
+                    kind[c] = ("Set by sliders" if c in cur else "Worked out" if c.startswith("dev_") and b not in W.FROZEN else "Typed here or starting week" if c in W.ADVANCED_KNOBS else "Stays at the starting week")
+                tbl = pd.DataFrame({"Feature": list(feats0), "Plain name": [W.LABELS.get(c.replace("hist_mean_", "").replace("dev_", ""), c) + (" (recent average)" if c.startswith("hist_mean_") else " (change vs recent average)" if c.startswith("dev_") else "") for c in feats0],
+                                    "Value": [round(v, 4) for v in feats0.values()], "How it is set": [kind[c] for c in feats0], "Typical": [round(meta["medians"][c], 3) for c in feats0], "99th percentile": [round(meta["p99"][c], 3) for c in feats0]})
+                epoch = st.session_state.setdefault("wi_adv_epoch", 0)
+                st.button("Clear typed values", on_click=lambda: st.session_state.update(wi_adv_epoch=epoch + 1))
+                edited = st.data_editor(tbl, hide_index=True, disabled=["Feature", "Plain name", "How it is set", "Typical", "99th percentile"], key=f"wi_adv_{base_id}_{epoch}", height=300)
+        overrides = {r.Feature: float(r.Value) for r in edited.itertuples() if abs(float(r.Value) - round(feats0[r.Feature], 4)) > 1e-9}
+        feats, notes = W.rebuild(base, cur, overrides)
+        res = W.predict(models, meta, pd.DataFrame([feats]))
+        score, score_g = float(res["score"].iloc[0]), float(res["score_generic"].iloc[0])
+        pct, pct_g = W.percentile(meta, "score", score), W.percentile(meta, "score_generic", score_g)
+        v = W.verdict(meta, score)
+        with right:
+            with st.container(key="wi_rating", border=True):   # pinned (sticky) so the rating stays in view while the sliders are used
+                st.caption("Risk rating of this week (final model)")
+                st.markdown(f"#### Riskier than {pct:.2f}% of real weeks")
+                if v is not None:
+                    st.success(f"Would be an alert at the {v:g}% budget (score {score:.4f}).")
+                else:
+                    st.info(f"Would not be an alert at any budget up to 2% (score {score:.4f}).")
+                a, b = st.columns(2)
+                a.metric("All features: riskier than", f"{pct:.1f}%", f"of weeks · score {score:.4f}", delta_color="off")
+                b.metric("No named sites: riskier than", f"{pct_g:.1f}%", f"of weeks · score {score_g:.4f}", delta_color="off")
+            for n in notes:
+                st.info(n)
+            for w_ in W.range_warnings(meta, feats, list(cur) + [k for k in overrides if k in meta["p99"]]):
+                st.warning(w_)
+            g = pd.DataFrame({"group": list(U.GROUP_COLS.values()), "contribution": [float(res[k].iloc[0]) for k in meta["groups"]]})
+            st.altair_chart(alt.Chart(g).mark_bar().encode(y=alt.Y("group:N", sort="-x", title=None, axis=alt.Axis(labelLimit=230, labelOverlap=False)), x=alt.X("contribution:Q", title="Pushes the risk up (right) or down (left)"),
+                            color=alt.condition(alt.datum.contribution > 0, alt.value(PAL["positive"]), alt.value(PAL["negative"]))).properties(height=330), width="stretch")
+            st.caption("**How to read this:** each bar is one kind of behaviour. A bar to the right pushed this week's risk up, a bar to the left pulled it down, and a longer bar means a bigger push. The longest bar is what moved this rating the most.")
+    st.caption("This rating is a ranking signal (how this week compares with real weeks), not the probability that someone is an insider. Named-site features (leak, keylogger, job, cloud and competitor sites) are close to label markers in this synthetic data, so look at the 'no named sites' rating too. "
                "The final model has seen every week, so its ratings differ slightly from the out-of-sample scores shown on the other pages.")
     st.subheader("Sweep one behaviour")
-    st.write("Pick one behaviour and see how the rating changes from none to a lot, with everything else held where you set it.")
-    sw_opts = W.SLIDERS + W.ADVANCED_KNOBS
-    knob = st.selectbox("Behaviour to sweep", sw_opts, format_func=lambda k: W.LABELS[k], key="wi_sweep")
+    st.write("Pick one behaviour and see how the rating changes from none to a lot, with everything else held where you set it. The list starts with the behaviour that moves this rating the most.")
     cur_all = dict(cur)
     for k in W.ADVANCED_KNOBS:
         cur_all[k] = feats[k]
-    df = W.sweep(models, meta, base, cur_all, knob, n=50, overrides={k: v_ for k, v_ in overrides.items() if k not in (knob, f"dev_{knob}")})
-    long = pd.concat([df.assign(series="All features", p=df["pct"]), df.assign(series="Without named-site features", p=df["pct_generic"])])
-    colour = alt.Color("series:N", scale=alt.Scale(domain=["All features", "Without named-site features"], range=[PAL["accent"], PAL["muted"]]), legend=alt.Legend(title=None, orient="top", labelLimit=300))
-    line = alt.Chart(long).mark_line(strokeWidth=2).encode(x=alt.X("value:Q", title=W.LABELS[knob]), y=alt.Y("p:Q", scale=alt.Scale(domain=[0, 100]), title="Riskier than this % of real weeks"), color=colour)
-    cuts = pd.DataFrame({"y": [100 - float(q) for q in meta["budget_cutoffs"]], "label": [f"alert at top {q}%" for q in meta["budget_cutoffs"]]})
-    rules = alt.Chart(cuts).mark_rule(strokeDash=[4, 4], color=PAL["muted"]).encode(y="y:Q", tooltip=["label"])
-    note = alt.Chart(pd.DataFrame({"x": [0], "y": [92], "t": ["dashed lines: alert budgets (top 2%, 1%, 0.5%, 0.25%)"]})).mark_text(align="left", dx=4, color=PAL["text2"], fontSize=11).encode(x="x:Q", y="y:Q", text="t:N")
+    eff = W.knob_effects(models, meta, base, cur_all, overrides)
+    order = list(eff["knob"])
+    knob = st.selectbox("Behaviour to sweep", order, format_func=lambda k: W.LABELS[k] + ("  (biggest effect right now)" if k == order[0] else ""), key="wi_sweep")
+    ov = {k: v_ for k, v_ in overrides.items() if k not in (knob, f"dev_{knob}")}
+    df = W.sweep(models, meta, base, cur_all, knob, n=160, overrides=ov)
+    df["z"], df["z_g"] = W.logit(df["score"]), W.logit(df["score_generic"])
+    cuts = pd.DataFrame({"z": [float(W.logit(c)) for c in meta["budget_cutoffs"].values()], "label": [f"top {qq}% cut-off" for qq in meta["budget_cutoffs"]]})
+    lo, hi = min(df["z"].min(), df["z_g"].min(), cuts["z"].min()) - 1, max(df["z"].max(), df["z_g"].max(), cuts["z"].max()) + 1
+    long = pd.concat([df.assign(series="All features", y=df["z"]), df.assign(series="No named sites", y=df["z_g"])])
+    colour = alt.Color("series:N", scale=alt.Scale(domain=["All features", "No named sites"], range=[PAL["accent"], PAL["muted"]]), legend=alt.Legend(title=None, orient="top", labelLimit=300))
+    ysc = alt.Scale(domain=[lo, hi], nice=False)
+    line = alt.Chart(long).mark_line(strokeWidth=2, interpolate="step-after").encode(x=alt.X("value:Q", title=W.LABELS[knob]), y=alt.Y("y:Q", scale=ysc, title="Risk score (log-odds: higher = riskier)"), color=colour, tooltip=["series", "value", "y"])
+    rules = alt.Chart(cuts).mark_rule(strokeDash=[4, 4], color=PAL["text2"]).encode(y=alt.Y("z:Q", scale=ysc))
+    xmax = float(df["value"].max())
+    names_ = alt.Chart(cuts.assign(x=xmax)).mark_text(align="right", baseline="bottom", dx=-4, dy=-2, color=PAL["text"], fontSize=11).encode(x="x:Q", y=alt.Y("z:Q", scale=ysc), text="label:N")
     here = alt.Chart(pd.DataFrame({"x": [cur_all[knob]]})).mark_rule(color=PAL["text"], strokeWidth=1.5).encode(x="x:Q")
-    st.altair_chart((line + rules + here + note).properties(height=300), width="stretch")
-    st.caption("**How to read this:** the line shows how risky the model thinks the week is as you turn just this one behaviour up from none to a lot. Higher means riskier. The dashed lines mark the alert budgets: once a line crosses one, that week would become an alert. "
-               "The white vertical line is where the slider is now. A flat line means the model hardly reacts to this behaviour on its own.")
+    st.altair_chart((line + rules + names_ + here).properties(height=320), width="stretch")
+    st.caption("**How to read this:** the line shows how risky the model thinks the week is as you turn just this one behaviour up from none to a lot; higher is riskier. The dashed lines are the alert cut-offs: where the blue line is above one, "
+               "that week would be an alert at that budget. The white vertical line is where the slider is now. A flat line means the model hardly reacts to this behaviour on its own; steps are normal, because the model decides in thresholds.")
+    cut = meta["budget_cutoffs"][str(q)]
+    cr = W.first_crossing(df, cut, cur_all[knob], score)
+    lab_, now_, typ_, p99_ = W.LABELS[knob], cur_all[knob], typical[knob], meta["p99"][knob]
+    if cr is None:
+        st.markdown(f"**What would it take?** Within the range {df['value'].min():g} to {df['value'].max():g}, changing only *{lab_.lower()}* " + ("never makes this week an alert" if score < cut else "never stops this week being an alert") + f" at the {q}% budget (pick another budget in the sidebar).")
+    elif cr[0] == "up":
+        st.markdown(f"**What would it take?** *{lab_}* would need to reach about **{cr[1]:g}** (now {now_:g}; a typical week has {typ_:g}) for this week to become an alert at the {q}% budget." + (f" That is beyond what 99% of real weeks show ({p99_:g})." if cr[1] > p99_ else ""))
+    else:
+        st.markdown(f"**What would it take?** This week stops being an alert at the {q}% budget if *{lab_.lower()}* falls below about **{cr[1]:g}** (now {now_:g}).")
+    st.caption("**How to read this:** this sentence reads the same line as the chart above: it finds the first value where the blue line crosses the dashed cut-off of the alert budget chosen in the sidebar, keeping every other slider where it is.")
 
 
 def page_rigor():
     T = U.metrics_tables(metrics)
-    st.subheader("What these alert lists achieve")
-    st.dataframe(T["lists"].reset_index(), hide_index=True, width="stretch")
-    st.caption("A global top-q% of all weeks is easier than a real weekly queue. Both lists use the out-of-fold scores shown in this app; insiders caught are out of 70.")
-    st.subheader("PR-AUC, 25 folds (5x5 user-split CV), XGBoost")
-    st.dataframe(T["pr_auc"], width="stretch")
-    st.dataframe(T["paired"], width="stretch")
-    st.caption("W2 = weekly counts and history; +E+H = email and web features; generic = without the named-site (category-domain) features; calendar = a negative control (calendar week as a feature).")
-    st.subheader("Alert budget, 25 folds")
-    st.dataframe(T["budget"], hide_index=True, width="stretch")
-    st.subheader("Time-based evaluation (train on weeks <= T, test later)")
-    st.dataframe(T["time_split"], hide_index=True, width="stretch")
-    st.subheader("Unseen users and future weeks")
-    st.dataframe(T["double_holdout"], hide_index=True, width="stretch")
+    curve, facts = _json(RESULTS, "ui_budget_curve.json"), _json(RESULTS, "ui_rigor_facts.json")
+    st.subheader("Does it rank attack weeks above ordinary weeks?")
+    pr = metrics["pr_auc_25fold"]
+    names = {"W2": "First baseline (counts + history)", "W2+calendar": "Baseline + calendar week (a trick)", "W2+E+H generic": "Email + web, no named-site features", "W2+E+H": "Final model (email + web + named sites)"}
+    d = pd.DataFrame({"model": [names[k] for k in names], "score": [pr[k]["pr_auc_mean"] for k in names], "lo": [pr[k]["pr_auc_mean"] - pr[k]["pr_auc_std"] for k in names], "hi": [pr[k]["pr_auc_mean"] + pr[k]["pr_auc_std"] for k in names]})
+    bars = alt.Chart(d).mark_bar(color=PAL["accent"]).encode(y=alt.Y("model:N", sort=list(names.values()), title=None, axis=alt.Axis(labelLimit=320)), x=alt.X("score:Q", scale=alt.Scale(domain=[0, 1]), title="Ranking quality (PR-AUC, 1.0 = perfect)"))
+    err = alt.Chart(d).mark_errorbar(color=PAL["text"], ticks=True, thickness=2).encode(y=alt.Y("model:N", sort=list(names.values())), x=alt.X("lo:Q", title=""), x2="hi:Q")
+    st.altair_chart((bars + err).properties(height=190), width="stretch")
+    st.caption("**How to read this:** each bar is how well a model ranks real attack weeks above ordinary ones (longer is better; 1.0 would be perfect and random guessing is about "
+               f"{metrics['attack_weeks'] / metrics['n_scored_weeks']:.3f}). The thin line is the spread over the 25 train/test splits, so bars whose lines do not overlap really differ.")
+    if curve:
+        st.subheader("Real insiders caught against false alarms")
+        short = {"W2": "First baseline", "W2+E+H generic": "No named sites", "W2+E+H": "Final model"}
+        rows = [{"model": short[k], "budget": b, "caught": curve["sets"][k]["caught"][i], "false alarms": curve["sets"][k]["normal_flagged"][i]} for k in short for i, b in enumerate(curve["budgets"])]
+        df = pd.DataFrame(rows)
+        base = alt.Chart(df).encode(x=alt.X("budget:Q", scale=alt.Scale(type="log"), title="Alert budget (% of all weeks flagged, log scale)"), color=alt.Color("model:N", scale=alt.Scale(domain=list(short.values()), range=[PAL["muted"], PAL["text2"], PAL["accent"]]), legend=alt.Legend(title=None, orient="top", symbolType="stroke")))
+        c1, c2 = st.columns(2)
+        c1.altair_chart((base.mark_line(strokeWidth=2).encode(y=alt.Y("caught:Q", scale=alt.Scale(domain=[0, curve["n_insiders"]]), title=f"Real insiders caught (of {curve['n_insiders']})")) + base.mark_circle(size=30).encode(y="caught:Q")).properties(height=280), width="stretch")
+        c2.altair_chart((base.mark_line(strokeWidth=2).encode(y=alt.Y("false alarms:Q", title=f"Normal people flagged (of {curve['n_normal_users']})")) + base.mark_circle(size=30).encode(y="false alarms:Q")).properties(height=280), width="stretch")
+        st.caption("**How to read this:** left, a higher line means more real insiders found; right, a lower line means fewer innocent people flagged. Each dot is one alert budget (how many weeks may be flagged), "
+                   "moving right allows more alerts. The best model is high on the left chart and low on the right chart at the same budget.")
+    st.subheader("Does it hold up on weeks it has not seen?")
+    ts = pd.DataFrame(metrics["time_split"]).assign(test="Same people, later weeks")
+    dh = pd.DataFrame(metrics["double_holdout"]).rename(columns={"pr_auc_pooled": "pr_auc"}).assign(test="New people, later weeks")
+    both = pd.concat([ts, dh]); both["Model"] = both["set"].map({"W2": "First baseline", "W2+E+H": "Final model", "W2+E+H generic": "No named sites"}); both["cutoff"] = "from week " + (both["T"] + 1).astype(str)
+    cols = st.columns(2)
+    for col, test in zip(cols, ["Same people, later weeks", "New people, later weeks"]):
+        ch = alt.Chart(both[both["test"] == test]).mark_bar().encode(x=alt.X("cutoff:N", title=test + " (trained before, tested from this week)", axis=alt.Axis(labelAngle=0)), xOffset="Model:N",
+              y=alt.Y("R:Q", scale=alt.Scale(domain=[0, 1.1]), title="Share of its normal accuracy kept"),
+              color=alt.Color("Model:N", scale=alt.Scale(domain=["First baseline", "No named sites", "Final model"], range=[PAL["muted"], PAL["text2"], PAL["accent"]]), legend=alt.Legend(title=None, orient="top")),
+              tooltip=["Model", "cutoff", alt.Tooltip("R:Q", format=".2f")])
+        col.altair_chart(ch.properties(height=250), width="stretch")
+    st.caption("**How to read this:** a tall bar means the model kept most of the accuracy it shows in the main evaluation when it only had earlier weeks to learn from; 1.0 means no loss. "
+               "Bars are short for the earliest cutoff because very few attacks had happened yet, and shorter again when the test people are completely new.")
+    if facts and facts.get("graph_controls"):
+        gc = facts["graph_controls"]
+        st.subheader("Do connections between people add anything?")
+        gd = pd.DataFrame({"model": ["No connections (same features)", "With connections", "Connections scrambled", "Simple model we use"], "score": [gc["no_edge_mlp"], gc["graphsage"], gc["graphsage_shuffled_edges"], gc["xgboost_same_features"]]})
+        st.altair_chart(alt.Chart(gd).mark_bar(color=PAL["accent"]).encode(y=alt.Y("model:N", sort=list(gd["model"]), title=None, axis=alt.Axis(labelLimit=300)), x=alt.X("score:Q", scale=alt.Scale(domain=[0, 1]), title="Ranking quality (PR-AUC)")).properties(height=170), width="stretch")
+        st.caption("**How to read this:** the first three bars are the same neural network with real connections, none, and scrambled ones; if connections mattered the second bar would clearly beat the others. It does not, and the simple model (last bar) beats all three.")
     st.subheader("Limitations")
     for line in U.limitations(metrics):
         st.markdown(f"- {line}")
+    st.subheader("All the numbers")
+    with st.expander("Global list versus a real weekly queue"):
+        st.dataframe(T["lists"].reset_index(), hide_index=True, width="stretch")
+        st.caption("**How to read this:** each row is one alert budget. 'Insiders caught' is how many of the 70 insiders appear in the list and 'normal users flagged' how many innocent people; the weekly-queue rows are what you would get picking the riskiest weeks inside each calendar week instead.")
+    with st.expander("Ranking quality over 25 splits"):
+        st.dataframe(T["pr_auc"], width="stretch"); st.dataframe(T["paired"], width="stretch")
+        st.caption("**How to read this:** first table, a higher PR-AUC is better and the spread column shows how much it moved between splits. Second table, 'mean PR-AUC difference' is the gain of the first model over the second on the same splits; 'folds positive' counts the splits where it won (25/25 = every time).")
+    with st.expander("Alert budget over 25 splits"):
+        st.dataframe(T["budget"], hide_index=True, width="stretch")
+        st.caption("**How to read this:** for each model and budget, how many of the 70 insiders were caught and how many of the 930 normal people were flagged; more caught and fewer flagged is better.")
+    with st.expander("Time-based tests"):
+        st.dataframe(T["time_split"], hide_index=True, width="stretch"); st.dataframe(T["double_holdout"], hide_index=True, width="stretch")
+        st.caption("**How to read this:** 'retention R' is the time-based result divided by the main result on the same weeks, so 1.0 means nothing was lost; the first table uses the same people on both sides, the second completely new people.")
 
 
 {"Overview": page_overview, "Threat map": page_map, "Alerts": page_alerts, "Investigate": page_investigate, "What-if": page_whatif, "Rigor and limits": page_rigor}[page]()
