@@ -33,3 +33,7 @@ gnn2:                 # graph v2 on the W2+E+H features (notebooks 09-10; log 6f
   k_domain: 5         # top domains per user-week (K), chosen by the B0 timing rule, never changed after results
   k_email: 5          # top recipients per sender-week
   epochs: {mlp: 64, wsage: 75}   # pilot on repeat-0 fold-0 training users (notebook 10); the shuffled control reuses the wsage count
+
+new_prediction:       # the "New prediction" tab (hypothetical workers; session only, never saved). enabled: false = six tabs, byte-identical map payload
+  enabled: true
+  max_workers: 20

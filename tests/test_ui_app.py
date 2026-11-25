@@ -11,7 +11,7 @@ from itgnn import whatif as W
 
 AppTest = pytest.importorskip("streamlit.testing.v1").AppTest
 APP = str(Path(__file__).resolve().parents[1] / "app" / "streamlit_app.py")
-PAGES = ["Overview", "Threat map", "Alerts", "Investigate", "What-if", "Rigor and limits"]
+PAGES = ["Overview", "Threat map", "Alerts", "Investigate", "What-if", "Rigor and limits", "New prediction"]
 
 
 def _app(ui_results, monkeypatch):
@@ -32,7 +32,7 @@ def test_every_page_renders_and_nav_order(ui_results_full, monkeypatch):
     assert not at.exception and at.segmented_control[0].options == PAGES
     for page in PAGES:
         _go(at, page)
-    assert at.session_state["nav"] == "Rigor and limits"
+    assert at.session_state["nav"] == PAGES[-1]
 
 
 def test_default_path_never_loads_the_label_file(ui_results_full, monkeypatch):

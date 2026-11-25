@@ -307,6 +307,18 @@ def export_week_facts(cfg, out_dir="results", log=print):
     return out
 
 
+def export_domains(cfg, out_dir="results", log=print):
+    """ui_domains.parquet (label-free: domain, category, distinct users) for the New prediction tab's website picker. Writes only this file."""
+    from itgnn.comms_graph import EXCLUDED_DOMAINS
+    from itgnn.commslogs import WEB_CATEGORIES
+    from itgnn.ui_hypo import domain_table
+
+    t = domain_table(pd.read_parquet("data/processed/http_user_week_domain.parquet", columns=["user", "domain"]).drop_duplicates(), WEB_CATEGORIES, EXCLUDED_DOMAINS, 20)
+    t.to_parquet(Path(out_dir) / "ui_domains.parquet", index=False)
+    log(json.dumps({"domains": len(t), "named_site_domains": int((t["category"] != "").sum()), "mb": round((Path(out_dir) / "ui_domains.parquet").stat().st_size / 2**20, 3)}))
+    return t
+
+
 def export_curve(cfg, out_dir="results", log=print):
     """ui_budget_curve.json: insiders caught and normal users flagged (mean and sd over the 5 repeats of the 5x5 user-split CV) for W2, generic and
     W2+E+H on a grid of alert budgets. Same alert_budget function and seeds as ui_metrics.json, so the shared budgets agree."""
@@ -499,7 +511,7 @@ def export_metrics(cfg, out_dir="results", log=print):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("stage", choices=["caches", "scores", "edges", "metrics", "model", "curve", "facts", "weekfacts", "all"])
+    ap.add_argument("stage", choices=["caches", "scores", "edges", "metrics", "model", "curve", "facts", "weekfacts", "domains", "all"])
     ap.add_argument("--config", default="configs/config.yaml")
     a = ap.parse_args(argv)
     cfg = load_config(a.config)
@@ -519,6 +531,8 @@ def main(argv=None):
         export_facts(cfg, cfg["results_dir"])
     if a.stage in ("weekfacts", "all"):
         export_week_facts(cfg, cfg["results_dir"])
+    if a.stage in ("domains", "all"):
+        export_domains(cfg, cfg["results_dir"])
 
 
 if __name__ == "__main__":

@@ -17,7 +17,11 @@ from itgnn.ui_graph import build_payload
 from itgnn.ui_theme import theme_for
 
 RESULTS = os.getenv("ITGNN_RESULTS", "results")
-NAV = ["Overview", "Threat map", "Alerts", "Investigate", "What-if", "Rigor and limits"]
+import yaml
+
+_cfg = Path(os.getenv("ITGNN_CONFIG", "configs/config.yaml"))
+NP = {"enabled": True, "max_workers": 20, **((yaml.safe_load(open(_cfg)) or {}).get("new_prediction") or {} if _cfg.exists() else {})}   # the New prediction tab; enabled: false = the original six tabs
+NAV = ["Overview", "Threat map", "Alerts", "Investigate", "What-if", "Rigor and limits"] + (["New prediction"] if NP["enabled"] else [])
 
 st.set_page_config(page_title="Insider threat analyst view", layout="wide")
 need = ["ui_scores.parquet", "ui_weeks.parquet", "ui_edges.parquet", "ui_metrics.json"]
@@ -94,7 +98,7 @@ st.markdown(f"""<style>
 .st-key-wi_row [data-testid="stHorizontalBlock"] {{ align-items: stretch !important; }}
 .st-key-wi_row [data-testid="stColumn"] {{ align-self: stretch; }}
 .st-key-wi_row [data-testid="stColumn"] > [data-testid="stVerticalBlock"] {{ height: 100%; }}
-[data-testid="stLayoutWrapper"]:has(> .st-key-wi_rating) {{ position: sticky; top: 3.75rem; z-index: 30; background: {PAL['page']}; padding-bottom: 0.4rem; max-height: calc(100vh - 4.5rem); overflow-y: auto; }}
+[data-testid="stLayoutWrapper"]:has(> .st-key-wi_rating), [data-testid="stLayoutWrapper"]:has(> .st-key-np_rating) {{ position: sticky; top: 3.75rem; z-index: 30; background: {PAL['page']}; padding-bottom: 0.4rem; max-height: calc(100vh - 4.5rem); overflow-y: auto; }}
 [data-testid="stMetricValue"] {{ font-variant-numeric: tabular-nums; }}
 </style>""", unsafe_allow_html=True)
 
@@ -460,6 +464,15 @@ def page_whatif():
         st.markdown(f"**What would it take?** This week stops being an alert at the {q}% budget if *{lab_.lower()}* falls below about **{cr[1]:g}** (now {now_:g}).", help=rd)
 
 
+def page_new_prediction():
+    meta = _json(RESULTS, "final_model_meta.json")
+    if meta is None or not (Path(RESULTS) / "final_xgb_main.json").exists():
+        st.error("The New prediction tab needs the final models. Create them with `python -m itgnn.ui_export model`."); return
+    import new_prediction
+    new_prediction.render(dict(results=RESULTS, meta=meta, models=_models(RESULTS), scores=scores, PAL=PAL, howto=howto, budget_control=budget_control, cap=int(NP["max_workers"]),
+                               real_users=sorted(scores["user"].unique())))
+
+
 def page_rigor():
     T = U.metrics_tables(metrics)
     curve, facts = _json(RESULTS, "ui_budget_curve.json"), _json(RESULTS, "ui_rigor_facts.json")
@@ -524,7 +537,7 @@ def page_rigor():
               help="The first table uses the same people on both sides, the second completely new people.")
 
 
-{"Overview": page_overview, "Threat map": page_map, "Alerts": page_alerts, "Investigate": page_investigate, "What-if": page_whatif, "Rigor and limits": page_rigor}[page]()
+{"Overview": page_overview, "Threat map": page_map, "Alerts": page_alerts, "Investigate": page_investigate, "What-if": page_whatif, "Rigor and limits": page_rigor, "New prediction": page_new_prediction}[page]()
 st.divider()
 if page in EVAL_PAGES:   # only the pages that can show labels get the switch; it sits in an Advanced expander at the foot of the page, off by default
     with st.expander("Advanced"):
