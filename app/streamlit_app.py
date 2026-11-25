@@ -215,6 +215,10 @@ def page_overview():
 def page_map():
     st.subheader("Threat map")
     payload, stats = _payload(RESULTS, source.name, bool(eval_view))
+    hyp = st.session_state.get("np_workers", []) if NP["enabled"] else []
+    if hyp and (m_ := _json(RESULTS, "final_model_meta.json")):   # session-only hypothetical workers; the cached real payload is never modified
+        from itgnn.ui_hypo import augment_payload
+        payload = augment_payload(payload, hyp, m_["budget_cutoffs"])
     import threat_map
     threat_map.render(payload, PAL, on_open=_map_open, focus=st.session_state.get("map_focus"))
     c = payload["campaign"]

@@ -1,3 +1,4 @@
+import json
 import pandas as pd
 import pytest
 
@@ -143,3 +144,68 @@ def test_switch_off_gives_six_tabs(ui_results_full, monkeypatch):
     cfg.write_text(yaml.safe_dump({"new_prediction": {"enabled": False}}))
     at = _app(ui_results_full, monkeypatch, ITGNN_CONFIG=str(cfg)).run()
     assert at.segmented_control[0].options == ["Overview", "Threat map", "Alerts", "Investigate", "What-if", "Rigor and limits"]
+
+
+def _payload_and_worker(ui_results_full, **kw):
+    from itgnn.ui_graph import build_payload
+    sc, wk = ui_data.load_scores(ui_results_full), pd.read_parquet(ui_results_full / "ui_weeks.parquet")
+    payload, _ = build_payload(sc, wk, ui_data.ParquetSource(ui_results_full).all_edges())
+    meta, models = W.load_meta(ui_results_full), W.load_models(ui_results_full)
+    typ = W.median_baseline(meta)
+    this = {k: typ[k] for k in W.SLIDERS}
+    cw = int(payload["uw"][0]["cw"]); u0 = payload["uw"][0]["u"]
+    args = dict(sites={"wikileaks.org": ("leak", 3.0), "brand-new.example": ("", 2.0)}, pcs=["PC-1", H.NEW_PC], colleagues=[u0, "U9"])
+    args.update(kw)
+    w = H.make_worker(models, meta, typ, ui_data.load_scores(ui_results_full)["score"].to_numpy(), "Test 1", cw, payload["uw"][0]["d"], this, this, **args)
+    return payload, w, meta, u0
+
+
+def test_augment_is_identity_without_workers_and_never_mutates_the_real_payload(ui_results_full):
+    payload, w, meta, _ = _payload_and_worker(ui_results_full)
+    before = json.dumps(payload, sort_keys=True)
+    assert H.augment_payload(payload, [], meta["budget_cutoffs"]) is payload                                    # switch off / no workers: the same object, so byte-identical
+    out = H.augment_payload(payload, [w], meta["budget_cutoffs"])
+    assert json.dumps(payload, sort_keys=True) == before                                                          # the cached real payload is untouched
+    n = len(payload["uw"])
+    assert out["uw"][:n] == payload["uw"] and out["edges"][:len(payload["edges"])] == payload["edges"] and out["conn"][:len(payload["conn"])] == payload["conn"]   # real indices unchanged
+    assert out["campaign"] is payload["campaign"]                                                                  # the Campaign view never sees a worker
+
+
+def test_augment_adds_one_node_and_one_edge_per_connection(ui_results_full):
+    payload, w, meta, u0 = _payload_and_worker(ui_results_full)
+    out = H.augment_payload(payload, [w], meta["budget_cutoffs"])
+    i = len(payload["uw"]); rec = out["uw"][i]
+    assert rec["hyp"] == 1 and rec["u"] == "Test 1" and rec["i"] == i and len(out["uw"]) == i + 1
+    mine = [e for e in out["edges"][len(payload["edges"]):]]
+    assert len(mine) == 2 + 2 + 2 and all(e[0] == i for e in mine)
+    names = {(out["conn"][e[1]]["n"] if e[2] != 3 else "user:" + out["uw"][e[1]]["u"]): e for e in mine}
+    n_old = len(payload["conn"])
+    wl = next(k for k, c in enumerate(payload["conn"]) if c["n"] == "wikileaks.org")
+    assert names["wikileaks.org"][1] == wl and names["wikileaks.org"][1] < n_old                                    # existing website reused
+    assert names["brand-new.example"][1] >= n_old and "NEW PC of Test 1 (hypothetical)" in names and names["U9"][2] == 2   # new entries appended; an unflagged colleague is a contact
+    assert names["user:" + u0][2] == 3 or u0 in names                                                                # a flagged colleague that week is a direct person-to-person edge
+    assert "ins" not in rec and not [k for k in rec if k in ("label", "scenario", "window")]                       # no label fields
+
+
+def test_worker_without_connections_is_isolated_and_missing_week_extends_the_calendar(ui_results_full):
+    payload, w, meta, _ = _payload_and_worker(ui_results_full, sites={}, pcs=[], colleagues=[])
+    w["cal_week"], w["week_start"] = 99, pd.Timestamp("2012-01-02")
+    out = H.augment_payload(payload, [w], meta["budget_cutoffs"])
+    assert out["edges"] == payload["edges"] and {"cw": 99, "d": "2012-01-02"} in out["meta"]["calendar"]
+    assert [c["cw"] for c in out["meta"]["calendar"]] == sorted(c["cw"] for c in out["meta"]["calendar"])
+    assert out["uw"][-1]["nr"] in (0, 1)
+
+
+def test_map_page_renders_with_workers_and_loads_no_labels(ui_results_full, monkeypatch):
+    def boom(*a, **k): raise AssertionError("labels loaded")
+    monkeypatch.setattr(ui_data, "load_eval", boom)
+    at = _app(ui_results_full, monkeypatch).run()
+    _go(at, "New prediction")
+    at.text_input(key="np_name").set_value("Map worker").run()
+    at.multiselect(key="np_sites").set_value(["wikileaks.org"]).run()
+    at.button(key="np_add").click().run()
+    assert not at.exception and len(at.session_state["np_workers"]) == 1
+    at.button(key="np_map_Map worker").click().run()                                                              # "Show on map"
+    assert not at.exception and at.session_state["nav"] == "Threat map" and at.session_state["map_focus"]["user"] == "Map worker"
+    for page in ("Alerts", "Investigate", "Overview", "Threat map"):
+        _go(at, page)

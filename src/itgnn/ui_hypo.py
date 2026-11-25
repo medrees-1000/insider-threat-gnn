@@ -160,3 +160,42 @@ def load_domains(results):
     t = e.groupby("other_id").agg(category=("category", "first"), n_users=("user", "nunique")).reset_index().rename(columns={"other_id": "domain"})
     t = t.sort_values(["category", "n_users", "domain"], ascending=[False, False, True]).reset_index(drop=True)
     return t, f"results/ui_domains.parquet is missing, so only the {len(t)} websites seen in flagged weeks can be chosen. Create the full list with `python -m itgnn.ui_export domains`."
+
+
+def augment_payload(payload, workers, cutoffs):
+    """Threat-map payload plus the session's hypothetical workers. Returns the SAME object when there are no workers (so the payload is
+    unchanged byte for byte); otherwise a new dict that shares everything except new lists: real records keep their indices, workers are appended
+    after them, each connection is one edge (an existing website/PC/contact entry is reused, a new one appended), and the calendar gains the
+    worker's week when no flagged week exists there. cutoffs: {budget %: score cut-off} of the final model (same as the rating)."""
+    if not workers:
+        return payload
+    uw, conn, edges = list(payload["uw"]), list(payload["conn"]), list(payload["edges"])
+    real_by = {(r["cw"], r["u"]): r["i"] for r in payload["uw"]}
+    cidx = {(c["k"], c["n"]): i for i, c in enumerate(conn)}
+    cal = {c["cw"]: c["d"] for c in payload["meta"]["calendar"]}
+
+    def conn_of(kind, name, cat=""):
+        if (kind, name) not in cidx:
+            cidx[(kind, name)] = len(conn); conn.append({"k": kind, "n": name, "cat": cat})
+        return cidx[(kind, name)]
+
+    cut = {float(q): c for q, c in cutoffs.items()}
+    for w in workers:
+        i = len(uw)
+        s = w["score"]
+        inside = s >= cut[2.0]
+        uw.append({"i": i, "u": w["name"], "cw": w["cal_week"], "d": f"{w['week_start']:%Y-%m-%d}", "s": round(s, 5), "p": round(w["pct"], 3), "z": round(float(np.log(np.clip(s, 1e-6, 1 - 1e-6) / (1 - np.clip(s, 1e-6, 1 - 1e-6)))), 2),
+                   "g": round(w["score_generic"], 5), "sd": 0.0, "c": [round(v, 2) for v in w["groups"].values()], "lvl": int((s >= cut[1.0]) + (s >= cut[0.5]) + (s >= cut[0.25])) if inside else 0,
+                   "ne": int(w["features"]["em_n_ext_recip"]), "hyp": 1, "nr": 0 if inside else 1})
+        cal.setdefault(w["cal_week"], f"{w['week_start']:%Y-%m-%d}")
+        for dom, (cat, visits) in w["sites"].items():
+            edges.append([i, conn_of("domain", dom, cat), 1, float(visits), -1])
+        npc = max(len(w["pcs"]), 1)
+        for pc in w["pcs"]:
+            new = pc == NEW_PC
+            edges.append([i, conn_of("pc", f"NEW PC of {w['name']} (hypothetical)" if new else pc), 0, round(max(w["features"]["n_logon"], 1) / npc, 2), 0 if new else -1])
+        for col in w["colleagues"]:
+            j = real_by.get((w["cal_week"], col))
+            edges.append([i, j, 3, 1.0, -1] if j is not None else [i, conn_of("contact", col), 2, 1.0, -1])
+    meta = {**payload["meta"], "calendar": [{"cw": c, "d": d} for c, d in sorted(cal.items())], "hyp": [f"{w['name']}|{w['score']:.6f}|{len(w['sites'])}{len(w['pcs'])}{len(w['colleagues'])}|{w['cal_week']}" for w in workers]}   # only used to remount the component when a worker changes
+    return {**payload, "meta": meta, "uw": uw, "conn": conn, "edges": edges}

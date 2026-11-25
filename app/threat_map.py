@@ -21,5 +21,5 @@ def render(payload, theme, on_open, focus=None, key="threat_map"):
     # a changed `data` argument does not re-run the component's JavaScript, so anything that changes the payload (the evaluation flag, the
     # theme) must change the key and mount a fresh instance
     """Mount the map. `on_open` is called (before the rerun) when the user clicks "Open in Investigate" in the details panel."""
-    key = f"{key}_{'eval' if payload['meta'].get('evaluation') else 'plain'}_{theme['page']}"
+    key = f"{key}_{'eval' if payload['meta'].get('evaluation') else 'plain'}_{theme['page']}" + (f"_h{abs(hash(tuple(payload['meta']['hyp']))) % 10**8}" if payload["meta"].get("hyp") else "")   # workers change the data, so remount
     return _COMPONENT(key=key, data={"payload": payload, "theme": theme, "focus": focus}, on_open_change=on_open)

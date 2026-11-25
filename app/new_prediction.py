@@ -37,6 +37,12 @@ def _contrib_chart(groups, PAL, height=250):
                                           color=alt.condition(alt.datum.contribution > 0, alt.value(PAL["positive"]), alt.value(PAL["negative"]))).properties(height=height)
 
 
+def _show_on_map(w):
+    """Callback: open the Threat map on this worker's week with the worker focused (no real user is selected)."""
+    st.session_state["nav"] = "Threat map"
+    st.session_state["map_focus"] = {"user": w["name"], "week": f"{w['week_start']:%Y-%m-%d}"}
+
+
 def _alert_text(meta, score, q):
     return score >= meta["budget_cutoffs"][str(q)]
 
@@ -82,7 +88,7 @@ def render(ctx):
         ct.markdown("**This week**")
         usual, this_week = {}, {}
         for k in W.SLIDERS:
-            usual[k] = cu.slider(W.LABELS[k], 0, smax[k], key=f"np_u_{k}", help=f"A typical week has {typical[k]:g}; 99% of real weeks are at or below {meta['p99'][k]:g}. Larger values can be typed in the Advanced editor.")
+            usual[k] = cu.slider(f"{W.LABELS[k]} (usual)", 0, smax[k], key=f"np_u_{k}", help=f"A typical week has {typical[k]:g}; 99% of real weeks are at or below {meta['p99'][k]:g}. Larger values can be typed in the Advanced editor.")
             this_week[k] = ct.slider(W.LABELS[k], 0, smax[k], key=f"np_t_{k}", label_visibility="visible")
         st.caption("Starting values are a typical week. If the two columns are equal, every 'change versus usual' feature is 0.")
 
@@ -159,20 +165,21 @@ def render(ctx):
 
     st.subheader(f"This session's hypothetical workers ({len(workers)} of {cap})")
     if not workers:
-        st.caption("None yet. Build one above and add it; it will be listed here and (in the next stage) shown on the Threat map, Alerts and Investigate pages.")
+        st.caption("None yet. Build one above and add it; it will be listed here and shown on the Threat map.")
         return
-    h = st.columns([2, 1.2, 1.4, 1.6, 1.8, 1])
-    for col, t in zip(h, ["Worker", "Week", "Riskier than", "Without named sites", "Verdict at budget", ""]):
+    h = st.columns([2, 1.2, 1.4, 1.6, 1.8, 1, 1])
+    for col, t in zip(h, ["Worker", "Week", "Riskier than", "Without named sites", "Verdict (loosest budget)", "", ""]):
         col.caption(t)
-    q = st.session_state.get("_q", 0.5)
     for i, w in enumerate(workers):
-        c = st.columns([2, 1.2, 1.4, 1.6, 1.8, 1])
+        c = st.columns([2, 1.2, 1.4, 1.6, 1.8, 1, 1])
         c[0].markdown(f"**{w['name']}** · hypothetical")
         c[1].write(f"{w['week_start']:%Y-%m-%d}")
         c[2].write(f"{w['pct']:.1f}%")
         c[3].write(f"{w['pct_generic']:.1f}%")
-        c[4].write("alert" if _alert_text(meta, w["score"], q) else "no alert")
-        c[5].button("Remove", key=f"np_rm_{w['name']}", on_click=lambda n=w["name"]: st.session_state.update(np_workers=[x for x in st.session_state["np_workers"] if x["name"] != n]))
+        hit = [float(b) for b, cut in meta["budget_cutoffs"].items() if w["score"] >= cut]      # loosest budget at which this worker would be an alert
+        c[4].write(f"alert at {max(hit):g}%" if hit else f"no alert up to {max(float(b) for b in meta['budget_cutoffs']):g}%")
+        c[5].button("Show on map", key=f"np_map_{w['name']}", on_click=_show_on_map, args=(w,))
+        c[6].button("Remove", key=f"np_rm_{w['name']}", on_click=lambda n=w["name"]: st.session_state.update(np_workers=[x for x in st.session_state["np_workers"] if x["name"] != n]))
     d1, d2, _ = st.columns([1, 1, 3])
     d1.button("Clear all", key="np_clear", on_click=lambda: st.session_state.update(np_workers=[]))
     d2.download_button("Download CSV", H.to_csv(workers, W.feature_columns()), "hypothetical_workers.csv", "text/csv", key="np_csv", help="One row per worker with every input, the 79 features, the ratings and hypothetical = True.")

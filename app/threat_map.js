@@ -11,13 +11,14 @@ export default function (component) {
   const S = saved;
   const cal = M.calendar, calIdx = Object.fromEntries(cal.map((c, i) => [c.cw, i]));
   if (S.week === null || !(S.week in calIdx)) {  // open on the calendar week with the most flagged user-weeks
-    const cnt = {}; P.uw.forEach((r) => (cnt[r.cw] = (cnt[r.cw] || 0) + 1));
+    const cnt = {}; P.uw.forEach((r) => { if (!r.hyp) cnt[r.cw] = (cnt[r.cw] || 0) + 1; });
     S.week = +Object.entries(cnt).sort((a, b) => b[1] - a[1])[0][0];
   }
   const LV = ['top 2%', 'top 1%', 'top 0.5%', 'top 0.25%'];
   const catNames = { leak: 'leak site', download: 'keylogger site', job: 'job site', cloud: 'cloud storage', competitor: 'competitor' };
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-  const zr = (() => { const z = P.uw.map((r) => r.z); return [Math.min(...z), Math.max(...z)]; })();
+  const zr = (() => { const z = P.uw.filter((r) => !r.hyp).map((r) => r.z);   // hypothetical workers never rescale the real nodes
+    return [Math.min(...z), Math.max(...z)]; })();
   const usize = (z) => 20 + 28 * (z - zr[0]) / Math.max(zr[1] - zr[0], 1e-6);
 
   root.innerHTML = `
@@ -37,7 +38,8 @@ export default function (component) {
   <div class="legend"></div>`;
   const $ = (q) => root.querySelector(q), $$ = (q) => [...root.querySelectorAll(q)];
   const canvas = $('.canvas'), tip = $('.tip'), panel = $('.panel');
-  const evalOn = !!M.evaluation;
+  const evalOn = !!M.evaluation, hasHyp = P.uw.some((r) => r.hyp);
+  const lvName = (r) => (r.nr ? 'below top 2%' : LV[r.lvl]);   // a hypothetical worker that would not be a top-2% week
 
   const style = [
     { selector: 'node', style: { 'font-family': 'system-ui, sans-serif', 'font-size': 10, color: T.text, 'text-outline-width': 3, 'text-outline-color': T.canvas, 'text-valign': 'bottom', 'text-margin-y': 3, 'min-zoomed-font-size': 7, 'text-opacity': 0 } },
@@ -51,6 +53,7 @@ export default function (component) {
     { selector: 'node.pc.solo', style: { 'border-width': 2, 'border-color': T.risk[1] } },
     { selector: 'node.contact', style: { shape: 'ellipse', width: 8, height: 8, 'background-color': T.contact } },
     { selector: 'node.cluster', style: { shape: 'round-rectangle', 'background-opacity': 0.06, 'background-color': T.accent, 'border-width': 1, 'border-style': 'dashed', 'border-color': T.muted, label: 'data(label)', 'text-opacity': 1, 'text-valign': 'top', 'text-halign': 'center', 'font-size': 12, color: T.text2, 'text-outline-width': 0, padding: 16 } },
+    { selector: 'node.hyp', style: { 'border-width': 3, 'border-style': 'dashed', 'border-color': T.text, 'font-weight': 700 } },
     { selector: 'node.ins', style: { 'border-width': 4, 'border-color': T.ring, 'border-style': 'double' } },
     { selector: 'edge', style: { width: 'data(w)', 'line-color': T.edge.dom, opacity: 0.55, 'curve-style': 'haystack', 'haystack-radius': 0 } },
     { selector: 'edge.pc', style: { 'line-color': T.edge.pc, 'line-style': 'dashed' } },
@@ -89,7 +92,7 @@ export default function (component) {
   const catColor = (c) => T.cat[c] || T.site;
 
   function weekElements() {
-    const els = [], users = P.uw.filter((r) => r.cw === S.week && r.lvl >= S.minLvl), ids = new Set(users.map((r) => r.i));
+    const els = [], users = P.uw.filter((r) => r.cw === S.week && (r.hyp || r.lvl >= S.minLvl)), ids = new Set(users.map((r) => r.i));
     const deg = {};
     const usable = [];
     P.edges.forEach((e) => {
@@ -103,9 +106,9 @@ export default function (component) {
       usable.push(e); deg[e[1]] = (deg[e[1]] || 0) + 1;
     });
     let hidden = 0;
-    const visible = usable.filter((e) => { if (e[2] === 3) return true; const c = P.conn[e[1]]; const ok = S.leaves || c.cat || c.k === 'pc' || deg[e[1]] >= 2; if (!ok) hidden++; return ok; });
+    const visible = usable.filter((e) => { if (e[2] === 3) return true; const c = P.conn[e[1]]; const ok = S.leaves || c.cat || c.k === 'pc' || deg[e[1]] >= 2 || P.uw[e[0]].hyp; if (!ok) hidden++; return ok; });
     window.__tmDebug && (window.__tmDebug.hidden = hidden);
-    users.forEach((r, n) => els.push({ group: 'nodes', data: { id: 'u' + r.i, label: r.u, size: usize(r.z), color: riskColor(r.lvl), kind: 'user', i: r.i }, classes: 'user labeled' + (r.ins ? ' ins' : ''), position: spiral(n) }));
+    users.forEach((r, n) => els.push({ group: 'nodes', data: { id: 'u' + r.i, label: r.hyp ? `⚑ ${r.u} (hypothetical)` : r.u, size: usize(r.z), color: r.nr ? T.muted : riskColor(r.lvl), kind: 'user', i: r.i }, classes: 'user labeled' + (r.ins ? ' ins' : '') + (r.hyp ? ' hyp' : ''), position: spiral(n) }));
     const made = new Set(); let n = users.length;
     visible.forEach((e, k) => {
       if (e[2] === 3) { els.push({ group: 'edges', data: { id: 'e' + k, source: 'u' + e[0], target: 'u' + e[1], w: 1.5 + Math.min(Math.log1p(e[3]), 3) }, classes: 'mailu' }); return; }
@@ -253,6 +256,7 @@ export default function (component) {
     return c.map((v, k) => ({ v, name: groups[k] })).sort((a, b) => b.v - a.v).map((o) => `<div class="brow"><span class="bn">${esc(o.name)}</span><span class="bt"><span class="bf ${o.v >= 0 ? 'pos' : 'neg'}" style="width:${Math.max(2, 100 * Math.abs(o.v) / m)}%"></span></span><span class="bv">${o.v >= 0 ? '+' : ''}${o.v.toFixed(2)}</span></div>`).join('');
   };
   const chip = (c) => `<span class="chip" style="--c:${catColor(c)}">${esc(catNames[c] || c)}</span>`;
+  const hypBanner = '<p class="hint ev">HYPOTHETICAL WORKER: typed in by an analyst in this session, not in the data. Rated by the final model, which has seen every real week, so its position among real weeks is approximate.</p>';
   const lvlBadge = (l) => `<span class="badge" style="--c:${riskColor(l)}">${LV[l]}</span>`;
   const openBtn = (user, week) => `<button class="open" data-user="${esc(user)}" data-week="${esc(week)}">Open in Investigate &rarr;</button>`;
   function showSummary() {
@@ -265,11 +269,11 @@ export default function (component) {
     const nb = ele.neighborhood('node'), sites = nb.filter((n) => n.hasClass('site')), cats = sites.filter((n) => n.hasClass('cat')), pcs = nb.filter((n) => n.hasClass('pc')), con = nb.filter((n) => n.hasClass('contact')), usr = nb.filter((n) => n.hasClass('user'));
     const edgeW = (n) => { const e = ele.edgesWith(n)[0]; return e ? e.data('w') : 0; };
     const rec = P.uw[r];
-    const catRows = cats.map((n) => `<li>${chip(P.conn[n.data('ci')].cat)} <b>${esc(P.conn[n.data('ci')].n)}</b></li>`).join('') || '<li class="none">no named-site visits in this week</li>';
-    const pcRows = pcs.map((n) => `<li>${esc(P.conn[n.data('ci')].n)} ${n.hasClass('solo') ? '<span class="none">(nobody else that week)</span>' : '<span class="none">(shared with others that week)</span>'}${[...n.neighborhood('node.user')].filter((u) => u.id() !== ele.id()).map((u) => ` <span class="peer">${esc(u.data('label'))}</span>`).join('')}</li>`).join('') || '<li class="none">no PCs shown</li>';
-    panel.innerHTML = `<h3>${esc(rec.u)} <span class="wk">${rec.d}</span></h3><div>${lvlBadge(rec.lvl)} <span class="sub">risk percentile ${rec.p.toFixed(2)}</span></div>
-      <table class="kv"><tr><td>Score</td><td>${rec.s.toFixed(5)} <span class="none">&plusmn; ${rec.sd.toFixed(4)} over 5 repeats</span></td></tr><tr><td>Log-odds</td><td>${rec.z.toFixed(2)}</td></tr><tr><td>Generic-feature score</td><td>${rec.g.toFixed(5)} <span class="none">(no named-site features)</span></td></tr></table>
-      ${openBtn(rec.u, rec.d)}
+    const catRows = cats.map((n) => `<li>${chip(P.conn[n.data('ci')].cat)} <b>${esc(P.conn[n.data('ci')].n)}</b></li>`).join('') || `<li class="none">${rec.hyp ? 'none chosen' : 'no named-site visits in this week'}</li>`;
+    const pcRows = pcs.map((n) => `<li>${esc(P.conn[n.data('ci')].n)} ${n.hasClass('solo') ? '<span class="none">(nobody else that week)</span>' : '<span class="none">(shared with others that week)</span>'}${[...n.neighborhood('node.user')].filter((u) => u.id() !== ele.id()).map((u) => ` <span class="peer">${esc(u.data('label'))}</span>`).join('')}</li>`).join('') || `<li class="none">${rec.hyp ? 'none chosen' : 'no PCs shown'}</li>`;
+    panel.innerHTML = `<h3>${esc(rec.u)} <span class="wk">${rec.d}</span></h3>${rec.hyp ? hypBanner : ''}<div>${rec.nr ? `<span class="badge" style="--c:${T.muted}">below top 2%</span>` : lvlBadge(rec.lvl)} <span class="sub">risk percentile ${rec.p.toFixed(2)}</span></div>
+      <table class="kv"><tr><td>Score</td><td>${rec.s.toFixed(5)} ${rec.hyp ? '<span class="none">(final model)</span>' : `<span class="none">&plusmn; ${rec.sd.toFixed(4)} over 5 repeats</span>`}</td></tr><tr><td>Log-odds</td><td>${rec.z.toFixed(2)}</td></tr><tr><td>Generic-feature score</td><td>${rec.g.toFixed(5)} <span class="none">(no named-site features)</span></td></tr></table>
+      ${rec.hyp ? '' : openBtn(rec.u, rec.d)}
       <h4>Why it scored (log-odds)</h4>${bars(rec.c, M.groups)}
       <h4>Named-site evidence</h4><ul>${catRows}</ul>
       <h4>PCs</h4><ul>${pcRows}</ul>
@@ -310,7 +314,7 @@ export default function (component) {
   const plural = (k, w) => `${k} flagged user${k === 1 ? '' : 's'}${w}`;
   function tipHtml(n) {
     if (n.data('kind') === 'user') {
-      if (S.view === 'week') { const r = P.uw[n.data('i')]; return `<b>${esc(r.u)}</b><br>${LV[r.lvl]} · percentile ${r.p.toFixed(2)}<br>${r.d}<br><span class="why">${topReason(r)}</span>`; }
+      if (S.view === 'week') { const r = P.uw[n.data('i')]; return `<b>${esc(r.u)}</b>${r.hyp ? ' <i>(hypothetical)</i>' : ''}<br>${lvName(r)} · percentile ${r.p.toFixed(2)}<br>${r.d}<br><span class="why">${topReason(r)}</span>`; }
       const r = P.campaign.users[n.data('idx')]; return `<b>${esc(r.u)}</b><br>${LV[r.lvl]} · percentile ${r.p.toFixed(2)}<br>${r.wk} flagged weeks<br><span class="why">${topReason(bestWeekRec(r)).replace('Top reason', 'Top reason (best week)')}</span>`;
     }
     const c = (S.view === 'week' ? P.conn : P.campaign.conn)[n.data('ci')], k = n.neighborhood('node.user').length, where = S.view === 'week' ? ' this week' : ' overall';
@@ -351,7 +355,7 @@ export default function (component) {
     $('.legend').innerHTML = `<span class="lg"><b>Risk</b> ${T.risk.map((c, i) => `${sw(c, 'dot')}${LV[i]}`).join(' ')}</span>
       <span class="lg">${sw(T.site, 'dia')}website ${sw(T.pc, 'sq')}PC ${sw(T.contact, 'dot sm')}email contact ${sw(T.pc, 'sq solo')}PC nobody else used</span>
       <span class="lg"><b>Named-site category</b> ${['leak', 'download', 'job', 'cloud'].map((c) => `${sw(catColor(c), 'dia')}${catNames[c]}`).join(' ')} ${sw(T.cat.competitor, 'dia dash')}competitor</span>
-      <span class="lg">edges: <i class="e pc"></i>logged on <i class="e dom"></i>visited <i class="e mail"></i>emailed</span>${evalOn ? '<span class="lg ev">double ring = true insider (evaluation view)</span>' : ''}`;
+      <span class="lg">edges: <i class="e pc"></i>logged on <i class="e dom"></i>visited <i class="e mail"></i>emailed</span>${hasHyp ? `<span class="lg">${sw(T.muted, 'dot dash')}<b>⚑ hypothetical worker</b> (dashed ring; grey = would not be a top-2% week)</span>` : ''}${evalOn ? '<span class="lg ev">double ring = true insider (evaluation view)</span>' : ''}`;
   }
 
   draw();
