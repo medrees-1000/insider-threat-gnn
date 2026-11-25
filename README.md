@@ -24,6 +24,7 @@ no-edge and shuffled-edge controls added nothing, so the model is a plain gradie
 4. **Investigate** - one person's risk over time with the alert bands, and the bar chart of what pushed the week up.
 5. **What-if** - press *Leak-site visit* (or move any slider) and watch the pinned rating respond; open *Sweep one behaviour* to see where the verdict would flip.
 6. **Rigor and limits** - the checks behind the numbers (leak caught in the first baseline, 5x5 user-split CV, causality check, time-based test, graph controls) and what this does *not* show.
+7. **New prediction** - describe a made-up worker (usual week, this week, optional websites, computers and colleagues) and see the rating; see the section below.
 
 Optional: open *Advanced* at the foot of the Alerts, Investigate or Threat map page and tick *Evaluation view* to see ground-truth labels and attack windows (off by default; analysts never see them).
 
@@ -41,6 +42,7 @@ Optional: open *Advanced* at the foot of the Alerts, Investigate or Threat map p
 | `08-rigor.png` | Rigor and limits page (charts) |
 | `09-evaluation-view.png` | Threat map with *Evaluation view* on (double rings on true insiders) |
 | `10-neo4j-browser.png` | Neo4j Browser showing the neighbourhood query (optional) |
+| `11-new-prediction.png` | New prediction tab with one hypothetical worker rated (not captured yet) |
 
 Capture at about 1500 px wide in the dark theme (the default). Streamlit's *Settings* menu switches to the light theme.
 
@@ -72,7 +74,7 @@ mv -n /path/to/new_empty_dir/r4.2/*.csv data/raw/
 ## 3. Build everything the UI shows (about 9 minutes on a 20-core machine, cold)
 
 ```bash
-python -m itgnn.ui_export all        # = caches, scores, edges, metrics, model, curve, facts; each stage can run alone
+python -m itgnn.ui_export all        # = caches, scores, edges, metrics, model, curve, facts, weekfacts, domains; each stage can run alone
 ```
 | Stage | What it writes | Time |
 | --- | --- | --- |
@@ -82,6 +84,7 @@ python -m itgnn.ui_export all        # = caches, scores, edges, metrics, model, 
 | `metrics` | `results/ui_metrics.json` (recomputed from XGBoost fits; no notebook output needed) | about 1 min |
 | `model` | `results/final_xgb_main.json`, `final_xgb_generic.json`, `final_model_meta.json`, `final_model_rows.parquet` (the What-if scorer) | about 20 s |
 | `curve` | `results/ui_budget_curve.json` (alert-budget curve for the Overview and Rigor pages) | about 1 min |
+| `domains` | `results/ui_domains.parquet` (label-free website list for the New prediction picker; without it the tab offers only the websites seen in flagged weeks) | seconds |
 | `facts` | `results/ui_rigor_facts.json` (evaluation aggregates only: tenure leak, CV, causality check, graph controls) | about 1.5 min |
 
 Scores are out of fold only: 25 XGBoost fold models (5x5 user-split CV), every row scored by models that did not train on its
@@ -98,12 +101,23 @@ docker compose down                  # stop it (data stays in ./neo4j_data)
 The app uses Neo4j when it is reachable and loaded, otherwise `results/ui_edges.parquet`; both return identical rows (tested).
 No label, scenario or attack window is ever written to Neo4j. Neo4j Browser: http://localhost:7474.
 
+## New prediction tab: rate a hypothetical worker
+
+The seventh tab rates a worker you describe, with the saved final model: pick a name, a calendar week, a *usual week* and *this week* (the same 12 sliders), and optionally websites, computers and colleagues. It shows "riskier than X% of real weeks", the verdict at the alert budget you choose, and, right beside it, the same rating **without named sites**. Connections can only *raise* a matching count (for example 3 leak-site visits raise "Leak-site visits" to at least 3), never lower a value you set, and every raise is listed. A worker can be shown on the Threat map (dashed ring, tagged hypothetical), in the Alerts page (a separate block above the real table) and in Investigate.
+
+- **Workers live only in the browser session.** Nothing is written to `results/` or `data/`, a refresh clears them (up to 20; *Remove*, *Clear all* and a CSV download are on the tab), and they never enter any score, label, metric or percentile table. Real ranks never shift.
+- **Near-label caveat.** Named-site features (leak, keylogger, job, cloud, competitor sites) are near-label markers in this synthetic data: one leak-site visit lifts a typical week into the top 2%. Read the *without named sites* rating beside the main one. The rating is a ranking signal, not a probability.
+- **The rank is approximate.** The final model was trained on all real weeks, so a worker's score is placed against the out-of-fold scores of the real weeks; expect small differences.
+- Switch the tab off with `new_prediction: {enabled: false}` in `configs/config.yaml` (six tabs, unchanged map).
+
+Screenshot to save: `docs/screenshots/11-new-prediction.png`.
+
 ## 5. Run the app
 
 ```bash
 streamlit run app/streamlit_app.py   # open http://localhost:8501 (also from a Windows browser when run inside WSL2)
 ```
-Pages: Overview, Threat map (interactive Cytoscape.js graph), Alerts, Investigate, What-if (live scorer from the saved final models), Rigor and limits. The **evaluation view** (Advanced expander at the foot of the page, off by default) is the only
+Pages: Overview, Threat map (interactive Cytoscape.js graph), Alerts, Investigate, What-if (live scorer from the saved final models), Rigor and limits, New prediction. The **evaluation view** (Advanced expander at the foot of the page, off by default) is the only
 place that loads ground-truth labels. The app is read-only: it never trains and never writes. `ITGNN_RESULTS=<dir>` points it at
 another results folder.
 

@@ -138,8 +138,9 @@ def render(ctx):
                 tight = worker["verdict"]
                 st.info(f"Would not be an alert at the {q:g}% budget." + (f" It would be at the {tight:g}% budget." if tight is not None else " It would not be an alert at any budget up to 2%."))
             a, b = st.columns(2)
-            a.metric("All features: riskier than", f"{worker['pct']:.1f}%", help=f"Score {worker['score']:.4f}.")
-            b.metric("Without named sites: riskier than", f"{worker['pct_generic']:.1f}%", help=f"The same rating without the named-site features (score {worker['score_generic']:.4f}).")
+            a.metric("All features", f"{worker['pct']:.1f}%", help=f"Score {worker['score']:.4f}.")
+            b.metric("Without named sites", f"{worker['pct_generic']:.1f}%", help=f"The same rating without the named-site features (score {worker['score_generic']:.4f}).")
+            a.caption(f"riskier than {worker['pct']:.1f}% of real weeks"); b.caption(f"riskier than {worker['pct_generic']:.1f}% of real weeks")
             if worker["pct"] - worker["pct_generic"] > 20:
                 st.warning("The two ratings are far apart: the alert comes from named-site features, which are near-label markers.")
             for n in worker["notes"]:
@@ -168,14 +169,14 @@ def render(ctx):
         st.caption("None yet. Build one above and add it; it will be listed here and shown on the Threat map.")
         return
     h = st.columns([2, 1.2, 1.4, 1.6, 1.8, 1, 1])
-    for col, t in zip(h, ["Worker", "Week", "Riskier than", "Without named sites", "Verdict (loosest budget)", "", ""]):
+    for col, t in zip(h, ["Worker", "Week", "All features", "Without named sites", "Verdict (loosest budget)", "", ""]):
         col.caption(t)
     for i, w in enumerate(workers):
         c = st.columns([2, 1.2, 1.4, 1.6, 1.8, 1, 1])
         c[0].markdown(f"**{w['name']}** · hypothetical")
         c[1].write(f"{w['week_start']:%Y-%m-%d}")
-        c[2].write(f"{w['pct']:.1f}%")
-        c[3].write(f"{w['pct_generic']:.1f}%")
+        c[2].write(f"riskier than {w['pct']:.1f}% of real weeks")
+        c[3].write(f"riskier than {w['pct_generic']:.1f}% of real weeks")
         hit = [float(b) for b, cut in meta["budget_cutoffs"].items() if w["score"] >= cut]      # loosest budget at which this worker would be an alert
         c[4].write(f"alert at {max(hit):g}%" if hit else f"no alert up to {max(float(b) for b in meta['budget_cutoffs']):g}%")
         c[5].button("Show on map", key=f"np_map_{w['name']}", on_click=_show_on_map, args=(w,))
@@ -194,7 +195,7 @@ def render_investigate(w, meta, PAL, howto, eval_view):
         st.error("EVALUATION VIEW: not applicable to a hypothetical worker (there is no ground truth for it).")
     a, b, _ = st.columns([1, 1, 1])
     a.metric("Alert level", f"top {w['verdict']:g}%" if w["verdict"] is not None else "not an alert", help=f"Riskier than {w['pct']:.2f}% of real weeks (score {w['score']:.4f}).")
-    b.metric("Rarity without named sites", U.top_label(w["pct_generic"]), help=f"The same rating without the named-site features (score {w['score_generic']:.4f}).")
+    b.metric("Without named sites: riskier than", f"{w['pct_generic']:.1f}% of real weeks", help=f"The same rating without the named-site features (score {w['score_generic']:.4f}).")
     st.caption(f"Would rank about #{w['rank']:,} of {w['n_weeks']:,} scored weeks (approximate: the final model has already seen every real week). Calendar week {w['cal_week']} ({w['week_start']:%Y-%m-%d}).")
     st.subheader(f"This week compared with {w['name']}'s usual")
     vt = U.week_vs_usual(H.facts_row(w))

@@ -255,7 +255,7 @@ def page_alerts():
     if hyp and m_:
         with st.container(border=True):
             st.markdown("**Hypothetical workers (this session)**")
-            st.dataframe(pd.DataFrame([{"Worker": f"⚑ {w['name']} (hypothetical)", "Week": f"{w['week_start']:%Y-%m-%d}", "Riskier than": f"{w['pct']:.2f}% of real weeks", "Without named sites": f"{w['pct_generic']:.1f}%",
+            st.dataframe(pd.DataFrame([{"Worker": f"⚑ {w['name']} (hypothetical)", "Week": f"{w['week_start']:%Y-%m-%d}", "All features": f"riskier than {w['pct']:.2f}% of real weeks", "Without named sites": f"riskier than {w['pct_generic']:.1f}% of real weeks",
                                         f"At the {q:g}% budget": "would be an alert" if w["score"] >= m_["budget_cutoffs"][str(q)] else "would not be an alert",
                                         "Where it would rank": f"about #{w['rank']:,} of {w['n_weeks']:,} scored weeks"} for w in hyp]), hide_index=True, width="stretch")
             st.caption("Not part of the real list below, so no real rank shifts. The rank is approximate because the final model has already seen every real week.")
