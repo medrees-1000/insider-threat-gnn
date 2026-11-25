@@ -1,0 +1,2 @@
+*.ipynb linguist-documentation
+app/vendor/** linguist-vendored
