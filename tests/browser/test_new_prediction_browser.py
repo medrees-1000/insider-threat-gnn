@@ -14,6 +14,18 @@ _BTN = """(() => { const e = [...document.querySelectorAll('button')].find((b) =
   e.scrollIntoView({block: 'center'}); const r = e.getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; })()"""
 
 
+def _site_only_for_the_worker():
+    """A website nobody in the flagged weeks visited, so its map node exists only because of the hypothetical worker."""
+    import pandas as pd
+    e = pd.read_parquet(base.ROOT / "results" / "ui_edges.parquet", columns=["edge_type", "other_id"])
+    seen = set(e.loc[e["edge_type"] == "VISITED", "other_id"])
+    d = pd.read_parquet(base.ROOT / "results" / "ui_domains.parquet")
+    return next(x for x in d[d["category"] == ""].sort_values("n_users", ascending=False)["domain"] if x not in seen and not any(y != x and x in y for y in d["domain"]))
+
+
+NEW_SITE = _site_only_for_the_worker() if base.ROOT.joinpath("results", "ui_domains.parquet").exists() else None
+
+
 def press(b, text):
     b.eval(_BTN % json.dumps(text)); time.sleep(0.6)
     xy = b.eval(_BTN % json.dumps(text)); assert xy, f"button {text!r} not found or disabled"
@@ -43,6 +55,8 @@ def browser(app_url):
     type_into(b, "Worker name", "Browser worker"); b.eval("document.activeElement.blur()"); time.sleep(2.5)
     pick(b, "Websites visited", "wikileaks")
     assert b.wait("Visits to wikileaks.org"), "the website was not selected"
+    pick(b, "Websites visited", NEW_SITE)
+    assert b.wait(f"Visits to {NEW_SITE}"), "the second website was not selected"
     press(b, "Add to this session's list")
     assert b.wait("Added Browser worker"), "the worker was not added"
     press(b, "Show on map")
@@ -77,3 +91,12 @@ def test_hover_click_and_drag_the_worker_node_after_a_scroll(browser):
     browser.drag(node["x"], node["y"], node["x"] + 60, node["y"] + 40); time.sleep(0.8)
     after = browser.eval(_POS % node["id"])
     assert abs((after[0] - before[0]) * node["zoom"] - 60) < 8 and abs((after[1] - before[1]) * node["zoom"] - 40) < 8
+
+
+def test_tooltip_of_a_node_that_exists_only_for_the_worker(browser):
+    browser.eval("document.querySelector('[data-testid=stMain]').scrollTo(0, 0)"); time.sleep(0.5)
+    n = json.loads(browser.eval("""(() => { const d = window.__tmDebug, cy = d.cy; cy.center(cy.nodes('.hyp')[0]); const r = d.root.querySelector('.canvas').getBoundingClientRect();
+      const m = cy.nodes().filter((x) => x.data('label') === %s)[0]; if (!m) return 'null'; const p = m.renderedPosition(); return JSON.stringify({x: r.left + p.x, y: r.top + p.y}); })()""" % json.dumps(NEW_SITE)))
+    assert n, f"{NEW_SITE} is not drawn"
+    tip = hover(browser, n)
+    assert "visited by this hypothetical worker" in tip and "flagged user" not in tip, tip

@@ -209,3 +209,41 @@ def test_map_page_renders_with_workers_and_loads_no_labels(ui_results_full, monk
     assert not at.exception and at.session_state["nav"] == "Threat map" and at.session_state["map_focus"]["user"] == "Map worker"
     for page in ("Alerts", "Investigate", "Overview", "Threat map"):
         _go(at, page)
+
+
+def test_alerts_block_and_investigate_page_for_a_worker(ui_results_full, monkeypatch):
+    def boom(*a, **k): raise AssertionError("labels loaded")
+    monkeypatch.setattr(ui_data, "load_eval", boom)
+    at = _app(ui_results_full, monkeypatch).run()
+    _go(at, "Alerts")
+    real_before = at.dataframe[0].value.copy()
+    _go(at, "New prediction")
+    at.text_input(key="np_name").set_value("Alert worker").run()
+    at.multiselect(key="np_sites").set_value(["wikileaks.org"]).run()
+    at.number_input(key="np_v_wikileaks.org").set_value(100).run()
+    at.button(key="np_add").click().run()
+    _go(at, "Alerts")
+    assert any("Hypothetical workers (this session)" in m.value for m in at.markdown)
+    block, real = at.dataframe[0].value, at.dataframe[1].value
+    assert "⚑ Alert worker (hypothetical)" in list(block["Worker"]) and "Where it would rank" in block.columns and block["Where it would rank"].iloc[0].startswith("about #")
+    assert not any("truth" in c.lower() for c in block.columns)
+    pd.testing.assert_frame_equal(real_before.reset_index(drop=True), real.reset_index(drop=True))                  # real ranks never shift
+    _go(at, "Investigate")
+    opts = at.selectbox[0].options
+    assert opts[:3] == ["U1", "U2", "U3"] and any("Alert worker" in o for o in opts)
+    at.selectbox[0].select([o for o in opts if "Alert worker" in o][0]).run()
+    assert not at.exception and any("compared with Alert worker" in s.value for s in at.subheader) and not any("This person over time" in s.value for s in at.subheader)
+    assert any("Named sites chosen" in m.value and "wikileaks.org" in m.value for m in at.markdown)
+    assert len(at.metric) == 2 and sum("How to read this" in c.value for c in at.caption) >= 2
+    at.selectbox[0].select("U1").run()                                                                              # the real path is unchanged behind the branch
+    assert not at.exception and any("This person over time" in s.value for s in at.subheader)
+
+
+def test_worker_facts_and_named_sites(ui_results_full):
+    payload, w, meta, _ = _payload_and_worker(ui_results_full)
+    t = ui_data.week_vs_usual(H.facts_row(w))
+    assert len(t) == 8 and t["This week"].iloc[-1] >= 3                                                              # wikileaks x3 shows in the named-site row
+    ns = H.named_sites(w)
+    assert list(ns["Site"]) == ["wikileaks.org"] and ns["Category"].iloc[0] == "leak site" and H.named_sites({**w, "sites": {}}).empty
+    out = H.augment_payload(payload, [w], meta["budget_cutoffs"])
+    assert out["meta"]["hyp_conn_from"] == len(payload["conn"]) and "hyp_conn_from" not in payload["meta"]

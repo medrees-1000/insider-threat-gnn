@@ -236,6 +236,7 @@ def page_map():
 
 
 PAGE = 25   # rows added by each "show more"
+HYP_PREFIX = "\u2691hyp:"
 
 
 def page_alerts():
@@ -250,6 +251,14 @@ def page_alerts():
     alerts = U.rank_alerts(sp, q, wk)
     scope = "all weeks" if wk is None else f"calendar week {int(wk)}"
     st.subheader(f"Top {q}% of weeks ({scope})")
+    hyp, m_ = (st.session_state.get("np_workers", []) if NP["enabled"] else []), _json(RESULTS, "final_model_meta.json")
+    if hyp and m_:
+        with st.container(border=True):
+            st.markdown("**Hypothetical workers (this session)**")
+            st.dataframe(pd.DataFrame([{"Worker": f"⚑ {w['name']} (hypothetical)", "Week": f"{w['week_start']:%Y-%m-%d}", "Riskier than": f"{w['pct']:.2f}% of real weeks", "Without named sites": f"{w['pct_generic']:.1f}%",
+                                        f"At the {q:g}% budget": "would be an alert" if w["score"] >= m_["budget_cutoffs"][str(q)] else "would not be an alert",
+                                        "Where it would rank": f"about #{w['rank']:,} of {w['n_weeks']:,} scored weeks"} for w in hyp]), hide_index=True, width="stretch")
+            st.caption("Not part of the real list below, so no real rank shifts. The rank is approximate because the final model has already seen every real week.")
     if not len(alerts):
         st.info("No scored weeks for this selection."); return
     g = metrics["ui_global_lists"][str(q)] if wk is None else None
@@ -300,7 +309,12 @@ def page_investigate():
     users = sorted(scores["user"].unique())
     su = st.session_state.sel_user
     c0, c1 = st.columns(2)
-    user = c0.selectbox("Person", users, index=users.index(su) if su in users else 0)
+    hyp = {HYP_PREFIX + w["name"]: w for w in (st.session_state.get("np_workers", []) if NP["enabled"] else [])}   # session-only hypothetical workers, listed after the real people
+    user = c0.selectbox("Person", users + list(hyp), index=users.index(su) if su in users else 0, format_func=lambda x: x if x in users else x.replace(HYP_PREFIX, "⚑ Hypothetical: "))
+    if user in hyp:
+        import new_prediction
+        new_prediction.render_investigate(hyp[user], _json(RESULTS, "final_model_meta.json"), PAL, howto, eval_view)
+        return
     tl = U.user_timeline(scores, user)
     weeks_l = list(tl["week_start"])
     sw = st.session_state.sel_week

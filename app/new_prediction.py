@@ -184,3 +184,27 @@ def render(ctx):
     d1.button("Clear all", key="np_clear", on_click=lambda: st.session_state.update(np_workers=[]))
     d2.download_button("Download CSV", H.to_csv(workers, W.feature_columns()), "hypothetical_workers.csv", "text/csv", key="np_csv", help="One row per worker with every input, the 79 features, the ratings and hypothetical = True.")
     st.caption("These workers are not in any score, label, metric or percentile table, and refreshing the page clears them.")
+
+
+def render_investigate(w, meta, PAL, howto, eval_view):
+    """Investigate page for a hypothetical worker: rating cards, this week vs usual (from the entered values), the chosen named sites and the
+    contribution bars. No timeline (no history exists) and no ground truth."""
+    st.info("Hypothetical worker: typed in during this session, not in the data. There is no timeline because no history exists.")
+    if eval_view:
+        st.error("EVALUATION VIEW: not applicable to a hypothetical worker (there is no ground truth for it).")
+    a, b, _ = st.columns([1, 1, 1])
+    a.metric("Alert level", f"top {w['verdict']:g}%" if w["verdict"] is not None else "not an alert", help=f"Riskier than {w['pct']:.2f}% of real weeks (score {w['score']:.4f}).")
+    b.metric("Rarity without named sites", U.top_label(w["pct_generic"]), help=f"The same rating without the named-site features (score {w['score_generic']:.4f}).")
+    st.caption(f"Would rank about #{w['rank']:,} of {w['n_weeks']:,} scored weeks (approximate: the final model has already seen every real week). Calendar week {w['cal_week']} ({w['week_start']:%Y-%m-%d}).")
+    st.subheader(f"This week compared with {w['name']}'s usual")
+    vt = U.week_vs_usual(H.facts_row(w))
+    sty = vt.style.format({"This week": "{:g}", "Their usual": "{:.1f}"}).map(lambda v: f"color: {PAL['risk'][3]}; font-weight: 700" if str(v).startswith("▲") else "", subset=["Compared with usual"])
+    st.dataframe(sty, hide_index=True, width="stretch", height=35 * (len(vt) + 1) + 3)
+    ns = H.named_sites(w)
+    st.markdown("**Named sites chosen:** " + ("; ".join(f"{r.Site} ({r.Category}) × {r.Visits:g}" for r in ns.itertuples()) if len(ns) else "none chosen"))
+    st.markdown("**Computers:** " + ("; ".join(w["pcs"]) if w["pcs"] else "none chosen") + "  \n**Colleagues emailed:** " + ("; ".join(w["colleagues"]) if w["colleagues"] else "none chosen"))
+    howto("each row sets this week's value you entered beside the usual value you entered, and a red marker means at least double and at least 3 more than usual.")
+    st.subheader("Why this week scored as it did")
+    st.altair_chart(_contrib_chart(w["groups"], PAL, 300), width="stretch")
+    howto("each bar is one kind of behaviour, to the right pushed this week's risk up, to the left pulled it down, and the longest bar mattered most.",
+          help="These are explanations of the score, not proof of why someone is risky.")

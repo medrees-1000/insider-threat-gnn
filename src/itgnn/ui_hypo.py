@@ -197,5 +197,24 @@ def augment_payload(payload, workers, cutoffs):
         for col in w["colleagues"]:
             j = real_by.get((w["cal_week"], col))
             edges.append([i, j, 3, 1.0, -1] if j is not None else [i, conn_of("contact", col), 2, 1.0, -1])
-    meta = {**payload["meta"], "calendar": [{"cw": c, "d": d} for c, d in sorted(cal.items())], "hyp": [f"{w['name']}|{w['score']:.6f}|{len(w['sites'])}{len(w['pcs'])}{len(w['colleagues'])}|{w['cal_week']}" for w in workers]}   # only used to remount the component when a worker changes
+    meta = {**payload["meta"], "hyp_conn_from": len(payload["conn"]), "calendar": [{"cw": c, "d": d} for c, d in sorted(cal.items())], "hyp": [f"{w['name']}|{w['score']:.6f}|{len(w['sites'])}{len(w['pcs'])}{len(w['colleagues'])}|{w['cal_week']}" for w in workers]}   # only used to remount the component when a worker changes
     return {**payload, "meta": meta, "uw": uw, "conn": conn, "edges": edges}
+
+
+def facts_row(w):
+    """The seven 'this week vs usual' counts (+ named-site total) of a worker, in the layout of one ui_week_facts row: current value and history mean."""
+    from itgnn.ui_data import USUAL_ROWS
+
+    f, row = w["features"], {}
+    for k, _ in USUAL_ROWS:
+        cols = W.CATEGORY_COUNTS if k == "wb_n_named" else [k]
+        row[k], row[f"hist_mean_{k}"] = sum(f[c] for c in cols), sum(f[f"hist_mean_{c}"] for c in cols)
+    return row
+
+
+def named_sites(w):
+    """Named sites the analyst chose for the worker (leak, job, cloud, keylogger, competitor), same columns as ui_data.named_sites_visited."""
+    from itgnn.ui_data import NAMED_CATEGORY
+
+    t = pd.DataFrame([{"Site": d, "Category": NAMED_CATEGORY[c], "Visits": float(v)} for d, (c, v) in w["sites"].items() if c in NAMED_CATEGORY], columns=["Site", "Category", "Visits"])
+    return t.sort_values(["Visits", "Site"], ascending=[False, True]).reset_index(drop=True)

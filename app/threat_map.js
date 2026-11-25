@@ -318,7 +318,8 @@ export default function (component) {
       const r = P.campaign.users[n.data('idx')]; return `<b>${esc(r.u)}</b><br>${LV[r.lvl]} · percentile ${r.p.toFixed(2)}<br>${r.wk} flagged weeks<br><span class="why">${topReason(bestWeekRec(r)).replace('Top reason', 'Top reason (best week)')}</span>`;
     }
     const c = (S.view === 'week' ? P.conn : P.campaign.conn)[n.data('ci')], k = n.neighborhood('node.user').length, where = S.view === 'week' ? ' this week' : ' overall';
-    const link = S.view === 'week' ? plural(k, where) : plural(c.deg, where);
+    const hypOnly = S.view === 'week' && M.hyp_conn_from !== undefined && n.data('ci') >= M.hyp_conn_from;   // exists only because of hypothetical workers
+    const link = hypOnly ? (k === 1 ? 'this hypothetical worker' : `${k} hypothetical workers`) : S.view === 'week' ? plural(k, where) : plural(c.deg, where);
     const what = c.k === 'pc' ? `PC logged on to by ${link}${n.hasClass('solo') ? ' (nobody else that week)' : ''}`
       : c.k === 'contact' ? `Email contact reached by ${link}`
       : c.cat ? `Website in the “${catNames[c.cat]}” watch category, visited by ${link}` : `Website visited by ${link}`;
