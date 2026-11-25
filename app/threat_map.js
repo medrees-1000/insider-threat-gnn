@@ -43,7 +43,7 @@ export default function (component) {
     { selector: 'node', style: { 'font-family': 'system-ui, sans-serif', 'font-size': 10, color: T.text, 'text-outline-width': 3, 'text-outline-color': T.canvas, 'text-valign': 'bottom', 'text-margin-y': 3, 'min-zoomed-font-size': 7, 'text-opacity': 0 } },
     { selector: 'node.labeled', style: { label: 'data(label)', 'text-opacity': 1, 'min-zoomed-font-size': 9 } },
     { selector: 'node.user.labeled, node.cat.labeled', style: { 'min-zoomed-font-size': 5 } },
-    { selector: 'node.user', style: { shape: 'ellipse', width: 'data(size)', height: 'data(size)', 'background-color': 'data(color)', 'border-width': 1, 'border-color': T.canvas, 'font-weight': 600, 'font-size': 11 } },
+    { selector: 'node.user', style: { shape: 'ellipse', width: 'data(size)', height: 'data(size)', 'background-color': 'data(color)', 'border-width': 1.5, 'border-color': T.outline, 'font-weight': 600, 'font-size': 12, 'z-index': 10 } },
     { selector: 'node.site', style: { shape: 'diamond', width: 15, height: 15, 'background-color': T.site } },
     { selector: 'node.site.cat', style: { width: 22, height: 22, 'background-color': 'data(color)', 'border-width': 1, 'border-color': T.ring, 'font-weight': 600 } },
     { selector: 'node.site.cat.neutral', style: { 'border-style': 'dashed', 'border-width': 2 } },
@@ -57,6 +57,8 @@ export default function (component) {
     { selector: 'edge.dom', style: { 'line-color': T.edge.dom, 'line-style': 'solid' } },
     { selector: 'edge.mail', style: { 'line-color': T.edge.mail, 'line-style': 'dotted' } },
     { selector: 'edge.mailu', style: { 'line-color': T.edge.mail, 'line-style': 'solid', opacity: 0.9, 'curve-style': 'bezier' } },
+    { selector: 'node.lblh', style: { 'text-opacity': 0 } },
+    { selector: 'node.lblforce', style: { 'text-opacity': 1, 'z-index': 999 } },
     { selector: '.dim', style: { opacity: 0.1, 'text-opacity': 0 } },
     { selector: 'edge.hl', style: { opacity: 0.95 } },
     { selector: 'node.sel', style: { 'border-width': 4, 'border-color': T.accent, 'border-style': 'solid' } },
@@ -132,6 +134,28 @@ export default function (component) {
     return els;
   }
 
+  // ---- label priority: draw labels in priority order and hide any that would overlap a higher-priority one ----------
+  const prio = (n, nb) => (nb && nb.has(n.id()) ? 0 : n.hasClass('user') ? 1 : n.hasClass('cat') ? 2 : n.hasClass('shared') ? 3 : 4);
+  const rectOf = (n) => { const bb = n.renderedBoundingBox({ includeLabels: true }), body = n.renderedBoundingBox({ includeLabels: false });
+    return { x1: bb.x1 - 2, x2: bb.x2 + 2, y1: Math.min(body.y2, bb.y2 - 1), y2: bb.y2 + 2 }; };
+  const hits = (a, b) => a.x1 < b.x2 && a.x2 > b.x1 && a.y1 < b.y2 && a.y2 > b.y1;
+  function layoutLabels() {
+    const nb = S.focusId ? new Set(cy.getElementById(S.focusId).closedNeighborhood('node').map((n) => n.id())) : null;
+    const nodes = cy.nodes('.labeled').not('.cluster').toArray().sort((a, b) => prio(a, nb) - prio(b, nb) || (b.data('size') || 0) - (a.data('size') || 0));
+    const bodies = cy.nodes('.user').map((n) => n.renderedBoundingBox({ includeLabels: false })), placed = [];
+    cy.batch(() => nodes.forEach((n) => {
+      const r = rectOf(n);
+      const hit = placed.some((p) => hits(r, p)) || (!n.hasClass('user') && bodies.some((b) => hits(r, b)));
+      n.toggleClass('lblh', hit); if (!hit) placed.push(r);
+    }));
+  }
+  let lblTimer = null;
+  const scheduleLabels = () => { if (lblTimer) clearTimeout(lblTimer); lblTimer = setTimeout(() => { lblTimer = null; layoutLabels(); }, 50); };
+  cy.on('zoom pan dragfree', scheduleLabels);
+  window.__tmDebug.labelStats = () => { const vis = cy.nodes('.labeled').not('.lblh').not('.dim').not('.cluster'); const rs = vis.map(rectOf); let ov = 0;
+    for (let i = 0; i < rs.length; i++) for (let j = i + 1; j < rs.length; j++) if (hits(rs[i], rs[j])) ov++;
+    return { labeled: cy.nodes('.labeled').not('.cluster').length, visible: vis.length, hidden: cy.nodes('.labeled.lblh').length, usersHidden: cy.nodes('.user.labeled.lblh').length, users: cy.nodes('.user').length, overlappingVisiblePairs: ov }; };
+
   // ---- draw / layout ---------------------------------------------------------------------------
   let playTimer = null, lastLayoutMs = 0;
   function draw() {
@@ -140,11 +164,11 @@ export default function (component) {
     const n = cy.nodes().length;
     $('.empty').textContent = n ? '' : 'No flagged user-weeks match these filters.';
     if (n && S.view === 'campaign') cy.layout({ name: 'preset', fit: true, padding: 40 }).run();
-    else if (n) cy.layout({ name: 'cose', animate: false, randomize: false, fit: true, padding: 36, nodeRepulsion: () => (S.view === 'week' ? 14000 : 16000), idealEdgeLength: () => (S.view === 'week' ? 80 : 70),
-      edgeElasticity: () => 80, gravity: S.view === 'week' ? 0.2 : 0.3, numIter: S.view === 'week' ? 700 : 900, nestingFactor: 0.9, componentSpacing: 60 }).run();
+    else if (n) cy.layout({ name: 'cose', animate: false, randomize: false, fit: true, padding: 36, nodeRepulsion: () => (S.view === 'week' ? 36000 : 16000), idealEdgeLength: () => (S.view === 'week' ? 120 : 70),
+      edgeElasticity: () => 80, gravity: S.view === 'week' ? 0.09 : 0.3, numIter: S.view === 'week' ? 800 : 900, nestingFactor: 0.9, componentSpacing: 60 }).run();
     lastLayoutMs = Math.round(performance.now() - t);
     window.__tmDebug.lastLayoutMs = lastLayoutMs; window.__tmDebug.nodes = n; window.__tmDebug.edges = cy.edges().length;
-    syncControls(); showSummary(); renderLegend();
+    syncControls(); S.focusId = null; renderLegend(); layoutLabels(); showSummary();
   }
 
   function syncControls() {
@@ -167,7 +191,7 @@ export default function (component) {
   function showSummary() {
     const n = cy.nodes('.user').length;
     panel.innerHTML = `<h3>${S.view === 'week' ? 'Flagged user-weeks' : 'Campaign view'}</h3><p class="sub">${S.view === 'week' ? `${n} flagged user-weeks in calendar week ${S.week} (${cal[calIdx[S.week]].d}); ${cy.nodes().length - n} neighbours shown` + (window.__tmDebug.hidden ? `, ${window.__tmDebug.hidden} links to unshared websites/contacts hidden (tick "All neighbours" to show them).` : '.') : `${n} flagged users linked through websites, PCs and email shared by at least two of them; communities are found with Louvain (weak structure when modularity is low).`}</p>
-      <p class="hint">Click a node to focus it and see the evidence. Drag nodes to rearrange. Scroll to zoom.</p>` + (evalOn ? `<p class="hint ev">EVALUATION VIEW: a double ring marks true insiders. Analysts never see this.</p>` : '');
+      <p class="hint">Click a node to focus it and see the evidence. Drag nodes to rearrange. Scroll to zoom.</p>` + (() => { const st = window.__tmDebug.labelStats(); return st.hidden ? `<p class="hint">${st.hidden} labels are hidden to keep the text readable (${st.usersHidden} of ${st.users} people). Zoom in, hover, or click a dot to see its name.</p>` : ''; })() + (evalOn ? `<p class="hint ev">EVALUATION VIEW: a double ring marks true insiders. Analysts never see this.</p>` : '');
   }
   function userPanel(r, ele) {
     const nb = ele.neighborhood('node'), sites = nb.filter((n) => n.hasClass('site')), cats = sites.filter((n) => n.hasClass('cat')), pcs = nb.filter((n) => n.hasClass('pc')), con = nb.filter((n) => n.hasClass('contact')), usr = nb.filter((n) => n.hasClass('user'));
@@ -199,9 +223,10 @@ export default function (component) {
       <h4>Strongest shared links</h4><ul>${cons.map((x) => { const c = C.conn[x.o.data('ci')]; return `<li>${c.cat ? chip(c.cat) + ' ' : ''}${esc(c.n)} <span class="none">${c.k === 'domain' ? 'website' : c.k === 'pc' ? 'PC' : 'contact'} · ${c.deg} flagged users</span></li>`; }).join('') || '<li class="none">none</li>'}</ul>`;
   }
   function focus(ele) {
-    cy.elements().removeClass('dim hl sel');
-    if (!ele || ele.empty() || ele.isEdge()) { showSummary(); return; }
+    cy.elements().removeClass('dim hl sel'); cy.nodes('.tmplbl').removeClass('labeled tmplbl lblh');
+    if (!ele || ele.empty() || ele.isEdge()) { S.focusId = null; showSummary(); scheduleLabels(); return; }
     const nb = ele.closedNeighborhood(); cy.elements().not(nb).addClass('dim'); nb.edges().addClass('hl'); ele.addClass('sel');
+    S.focusId = ele.id(); nb.nodes().not('.labeled').not('.cluster').addClass('labeled tmplbl'); scheduleLabels();
     if (ele.data('kind') === 'user') (S.view === 'week' ? userPanel(ele.data('i'), ele) : campUserPanel(ele)); else connPanel(ele);
   }
   cy.on('tap', 'node', (e) => { if (!e.target.hasClass('cluster')) focus(e.target); });
@@ -214,10 +239,10 @@ export default function (component) {
     let h;
     if (n.data('kind') === 'user') { const r = S.view === 'week' ? P.uw[n.data('i')] : P.campaign.users[n.data('idx')]; h = `<b>${esc(r.u)}</b><br>${LV[r.lvl]} · percentile ${r.p.toFixed(2)}${S.view === 'campaign' ? `<br>${r.wk} flagged weeks` : '<br>' + r.d}`; }
     else { const c = (S.view === 'week' ? P.conn : P.campaign.conn)[n.data('ci')]; h = `<b>${esc(c.n)}</b><br>${c.cat ? esc(catNames[c.cat]) + ' (named-site category)' : c.k === 'pc' ? 'PC' : c.k === 'domain' ? 'website' : 'email contact'}`; }
-    tip.innerHTML = h; tip.style.display = 'block'; n.addClass('labeled');
+    tip.innerHTML = h; tip.style.display = 'block'; n.addClass('labeled lblforce');
   });
   cy.on('mousemove', (e) => { if (e.originalEvent) { const r = canvas.getBoundingClientRect(); tip.style.left = Math.min(e.originalEvent.clientX - r.left + 14, r.width - 190) + 'px'; tip.style.top = (e.originalEvent.clientY - r.top + 14) + 'px'; } });
-  cy.on('mouseout', 'node', (e) => { tip.style.display = 'none'; const n = e.target; if (!n.hasClass('user') && !n.hasClass('cat') && !(S.labels && n.hasClass('shared'))) n.removeClass('labeled'); });
+  cy.on('mouseout', 'node', (e) => { tip.style.display = 'none'; const n = e.target; n.removeClass('lblforce'); if (!n.hasClass('user') && !n.hasClass('cat') && !n.hasClass('shared') && !n.hasClass('tmplbl')) n.removeClass('labeled'); });
 
   // ---- controls --------------------------------------------------------------------------------
   const go = (d) => { const i = Math.min(Math.max(calIdx[S.week] + d, 0), cal.length - 1); S.week = cal[i].cw; draw(); };

@@ -9,7 +9,7 @@ PALETTE = {
         "risk": ["#f9b36a", "#f28a45", "#e96a36", "#d94a2d"],              # top 2%, 1%, 0.5%, 0.25% of weeks
         "site": "#8196b0", "pc": "#a39e93", "contact": "#6f7d90",          # website diamonds, PC squares, email contacts
         "cat": {"leak": "#8e4088", "download": "#19aa8e", "job": "#a07cdb", "cloud": "#2f751d", "competitor": "#8196b0"},
-        "ring": "#ffffff", "edge": {"pc": "#7d8a9b", "dom": "#5c7794", "mail": "#4aa3ff"}, "positive": "#4aa3ff", "negative": "#6f7d90",
+        "outline": "#cdd6e0", "ring": "#ffffff", "edge": {"pc": "#7d8a9b", "dom": "#5c7794", "mail": "#4aa3ff"}, "positive": "#4aa3ff", "negative": "#6f7d90",
     },
     "light": {
         "page": "#fbfcfd", "panel": "#eef1f5", "canvas": "#f4f6f9", "border": "#d5dbe3",
@@ -17,7 +17,7 @@ PALETTE = {
         "risk": ["#d98a3a", "#cc6a24", "#bf4a18", "#a8320f"],
         "site": "#5d7189", "pc": "#7a756a", "contact": "#7b8899",
         "cat": {"leak": "#81347c", "download": "#05a388", "job": "#9a76d4", "cloud": "#23690d", "competitor": "#5d7189"},
-        "ring": "#101828", "edge": {"pc": "#667085", "dom": "#7a90a8", "mail": "#1a6fd6"}, "positive": "#1a6fd6", "negative": "#8794a6",
+        "outline": "#344054", "ring": "#101828", "edge": {"pc": "#667085", "dom": "#7a90a8", "mail": "#1a6fd6"}, "positive": "#1a6fd6", "negative": "#8794a6",
     },
 }
 CATEGORY_NOTE_SHORT = {"competitor": "competitor (neutral, dashed outline)"}

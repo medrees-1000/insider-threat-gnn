@@ -234,6 +234,142 @@ def build_caches(cfg, processed="data/processed", log=print):
         log(f"built {h} ({st['rows']:,} http rows, {st['url_fail']} unparsable URLs)")
 
 
+BUDGET_GRID = [0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]
+
+
+def export_model(cfg, out_dir="results", log=print):
+    """Final models for the what-if scorer: XGBoost W2+E+H and generic trained on ALL scored rows (same fixed hyperparameters as the CV runs),
+    saved as JSON, plus final_model_meta.json (feature order, label-free medians and 1st/99th percentiles, budget cut-offs and score ->
+    percentile tables from the OUT-OF-FOLD scores, explanation groups, a feature round-trip check) and final_model_rows.parquet
+    (features of the flagged top-2% weeks, for the optional real-week baseline; no labels)."""
+    from itgnn.ui_data import budget_cutoffs, rank_alerts
+    from itgnn.whatif import BASE_COLS, FROZEN, LABELS, SLIDERS, feature_columns, rebuild
+
+    t0 = time.time()
+    out = Path(out_dir)
+    d = prepare(cfg)
+    windows = load_attack_windows(cfg["raw_dir"])
+    weekly = drop_warmup(load_full(d, windows)).reset_index(drop=True)
+    y = weekly["label"].to_numpy()
+    allsets = comms_feature_sets(FEATURE_SETS["W2"])
+    fm, fg = allsets[MAIN], allsets[GENERIC]
+    assert sorted(fm) == sorted(feature_columns())
+    for name, cols, f in (("main", fm, "final_xgb_main.json"), ("generic", fg, "final_xgb_generic.json")):
+        m = make_xgb(y, cfg["seed"]).fit(weekly[cols], y)
+        m.get_booster().save_model(str(out / f))
+    sc = pd.read_parquet(out / "ui_scores.parquet")
+    cut = budget_cutoffs(sc)
+    grid = np.r_[np.arange(0, 0.99, 0.001), np.arange(0.99, 1.00001, 0.0001)]
+    oofq = {k: {"grid": [round(float(g), 5) for g in grid], "values": [float(v) for v in np.quantile(sc[k].to_numpy(float), grid)]} for k in ("score", "score_generic")}
+    X = weekly[fm]
+    rng = np.random.default_rng(cfg["seed"])
+    idx = rng.choice(len(weekly), 2000, replace=False)
+    diffs = []
+    for i in idx:   # round trip: rebuild all 79 features from (current counts, history) and compare with the stored values
+        row = weekly.loc[i, fm].astype(float).to_dict()
+        rebuilt, _ = rebuild(row, {c: row[c] for c in BASE_COLS if c not in FROZEN})
+        diffs.append(max(abs(rebuilt[c] - row[c]) for c in fm))
+    knob_max = {k: int(max(10, np.ceil(3 * float(np.quantile(weekly[k], 0.99))))) for k in LABELS}
+    meta = {"features_main": fm, "features_generic": fg, "groups": explanation_groups(fm), "medians": {c: float(np.median(X[c])) for c in fm},
+            "p01": {c: float(np.quantile(X[c], 0.01)) for c in fm}, "p99": {c: float(np.quantile(X[c], 0.99)) for c in fm}, "knob_max": knob_max,
+            "budget_cutoffs": {str(q): float(v) for q, v in cut.items()}, "oof_quantiles": oofq, "n_training_rows": int(len(weekly)), "n_attack_weeks": int(y.sum()),
+            "roundtrip_check": {"rows": len(idx), "max_abs_diff_all_79_features": float(max(diffs))}, "xgboost": xgb.__version__, "sliders": SLIDERS}
+    json.dump(meta, open(out / "final_model_meta.json", "w"), indent=1)
+    top = rank_alerts(sc, 2.0)[["user", "week_start"]]
+    rows = top.merge(weekly[["user", "week_start"] + fm], on=["user", "week_start"], how="left")
+    rows[fm] = rows[fm].astype("float32")
+    assert rows[fm].notna().all().all() and not any("label" in c for c in rows.columns)
+    rows.to_parquet(out / "final_model_rows.parquet", index=False)
+    log(json.dumps({"seconds": round(time.time() - t0, 1), "rows": len(weekly), "roundtrip": meta["roundtrip_check"],
+                    "sizes_mb": {f: round((out / f).stat().st_size / 2**20, 3) for f in ["final_xgb_main.json", "final_xgb_generic.json", "final_model_meta.json", "final_model_rows.parquet"]}}, indent=1))
+    return meta
+
+
+def export_curve(cfg, out_dir="results", log=print):
+    """ui_budget_curve.json: insiders caught and normal users flagged (mean and sd over the 5 repeats of the 5x5 user-split CV) for W2, generic and
+    W2+E+H on a grid of alert budgets. Same alert_budget function and seeds as ui_metrics.json, so the shared budgets agree."""
+    from itgnn.evaluation import alert_budget
+
+    t0 = time.time()
+    d = prepare(cfg)
+    windows = load_attack_windows(cfg["raw_dir"])
+    weekly = drop_warmup(load_full(d, windows)).reset_index(drop=True)
+    allsets = comms_feature_sets(FEATURE_SETS["W2"])
+    sets = {k: allsets[k] for k in ["W2", GENERIC, MAIN]}
+    labels = d["labels"]
+    ins = pd.read_csv(Path(cfg["raw_dir"]) / "answers" / "insiders.csv")
+    scen = ins[ins["dataset"].astype(str) == "4.2"].set_index("user")["scenario"]
+    folds = make_folds(d["users"], labels, cfg["cv"]["n_splits"], cfg["cv"]["n_repeats"], cfg["seed"])
+    long = fold_scores(weekly, folds, sets, cfg["seed"])
+    oof = long[["user", "week_start", "repeat", "fold", "set", "score"]].rename(columns={"set": "model"}).merge(weekly[["user", "week_start", "label"]], on=["user", "week_start"])
+    bud = alert_budget(oof[["user", "repeat", "fold", "model", "score", "label"]], labels, scen.to_dict(), BUDGET_GRID, cfg["seed"])
+    res = {"budgets": BUDGET_GRID, "n_insiders": len(labels), "n_normal_users": len(d["users"]) - len(labels), "n_scored_weeks": int(len(weekly)),
+           "protocol": "XGBoost, 5x5 user-split CV; mean and sd over the 5 repeats", "sets": {}}
+    for name in sets:
+        g = bud[bud["model"] == name].groupby("q%")
+        res["sets"][name] = {"caught": [round(float(g["caught"].mean().loc[q]), 2) for q in BUDGET_GRID], "caught_sd": [round(float(g["caught"].std().loc[q]), 2) for q in BUDGET_GRID],
+                             "normal_flagged": [round(float(g["normal flagged"].mean().loc[q]), 2) for q in BUDGET_GRID], "normal_flagged_sd": [round(float(g["normal flagged"].std().loc[q]), 2) for q in BUDGET_GRID],
+                             "weeks_flagged": [round(float(g["weeks flagged"].mean().loc[q]), 1) for q in BUDGET_GRID]}
+    res["seconds"] = round(time.time() - t0, 1)
+    from itgnn.ui_data import assert_aggregates_only
+    assert_aggregates_only(res)
+    json.dump(res, open(Path(out_dir) / "ui_budget_curve.json", "w"), indent=1)
+    log(f"saved ui_budget_curve.json in {res['seconds']}s")
+    return res
+
+
+def export_facts(cfg, out_dir="results", log=print):
+    """ui_rigor_facts.json: evaluation AGGREGATES only (scalars and small dicts; no per-row labels, scenarios or windows)."""
+    from sklearn.metrics import roc_auc_score
+
+    from itgnn.comms_audit import draw_sample, truncation_check
+
+    t0 = time.time()
+    out = Path(out_dir)
+    d = prepare(cfg)
+    windows = load_attack_windows(cfg["raw_dir"])
+    full = load_full(d, windows)
+    weekly = drop_warmup(full).reset_index(drop=True)
+    labels = d["labels"]
+    # 1. the tenure leak the first baseline had (users who stay the whole period are almost all normal)
+    lg = d["logon"][d["logon"]["activity"] == "Logon"]
+    days = lg.assign(day=lg["date"].dt.normalize()).groupby("user")["day"].nunique()
+    is_ins = days.index.isin(labels)
+    full_period = int(days[~is_ins].mode().iloc[0])   # the typical full tenure: the most common number of active days among normal users
+    tenure = {"active_days_auc_for_insider": round(float(roc_auc_score(is_ins, days.to_numpy())), 3), "typical_full_tenure_days": int(full_period),
+              "normal_users_covering_the_full_period": round(float((days[~is_ins] == full_period).mean()), 3),
+              "insiders_covering_the_full_period": round(float((days[is_ins] == full_period).mean()), 3)}
+    # 2. the cross-validation protocol
+    folds = make_folds(d["users"], labels, cfg["cv"]["n_splits"], cfg["cv"]["n_repeats"], cfg["seed"])
+    cv = {"folds": len(folds), "repeats": cfg["cv"]["n_repeats"], "max_users_shared_by_train_and_test": max(len(set(f["train"]) & set(f["test"])) for f in folds)}
+    # 3. causality: features recomputed from logs cut at the end of each sampled week
+    allsets = comms_feature_sets(FEATURE_SETS["W2"])
+    email = pd.read_parquet("data/processed/email.parquet")
+    agg = pd.read_parquet("data/processed/http_user_week_domain.parquet")
+    sample = draw_sample(weekly, n=200, n_attack=30, n_weeks=15, seed=cfg["seed"])
+    chk = truncation_check(sample, d["logon"], d["device"], d["file"], email, agg, full, allsets[MAIN])
+    ctrl = truncation_check(sample[sample["week_start"] == sample["week_start"].iloc[0]], d["logon"], d["device"], d["file"], email, agg, full, allsets[MAIN], cut_days=3)
+    causality = {"user_weeks_checked": int(len(chk)), "features_compared": len(allsets[MAIN]), "max_abs_difference": float(chk["max_abs_diff"].max()),
+                 "control_rows_that_differ": int((ctrl["max_abs_diff"] > 1e-9).sum()), "control_rows": int(len(ctrl))}
+    # 4. graph models vs controls (only if the stage-1 graph run is present in this clone)
+    graph = None
+    g1, o25 = out / "gnn2_stage1_oof_scores.parquet", out / "comms_25fold_oof_scores.parquet"
+    if g1.exists() and o25.exists():
+        from itgnn.evaluation import evaluate_scores
+        g = pd.read_parquet(g1)
+        x = pd.read_parquet(o25)
+        x = x[(x["repeat"] == 0) & (x["model"] == "XGB W2+E+H")]
+        mean_ap = lambda df: round(float(np.mean([evaluate_scores(gg["label"], gg["score"], 100)["pr_auc"] for _, gg in df.groupby("fold")])), 3)
+        graph = {"no_edge_mlp": mean_ap(g[g["model"] == "M0 MLP"]), "graphsage": mean_ap(g[g["model"] == "M1 GraphSAGE"]), "graphsage_shuffled_edges": mean_ap(g[g["model"] == "M2 GraphSAGE shuffled"]),
+                 "xgboost_same_features": mean_ap(x), "folds": 5, "gate_passed": False}
+    res = {"tenure_leak": tenure, "cross_validation": cv, "causality_check": causality, "graph_controls": graph, "seconds": round(time.time() - t0, 1)}
+    from itgnn.ui_data import assert_aggregates_only
+    assert_aggregates_only(res)
+    json.dump(res, open(out / "ui_rigor_facts.json", "w"), indent=1)
+    log(json.dumps(res, indent=1))
+    return res
+
+
 def _budget_rows(bud):
     """alert_budget output -> {model: {q: {caught mean/std, normal flagged mean/std, per scenario}}} (JSON-friendly)."""
     out = {}
@@ -341,7 +477,7 @@ def export_metrics(cfg, out_dir="results", log=print):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("stage", choices=["caches", "scores", "edges", "metrics", "all"])
+    ap.add_argument("stage", choices=["caches", "scores", "edges", "metrics", "model", "curve", "facts", "all"])
     ap.add_argument("--config", default="configs/config.yaml")
     a = ap.parse_args(argv)
     cfg = load_config(a.config)
@@ -353,6 +489,12 @@ def main(argv=None):
         export_edges(cfg, cfg["results_dir"])
     if a.stage in ("metrics", "all"):
         export_metrics(cfg, cfg["results_dir"])
+    if a.stage in ("model", "all"):
+        export_model(cfg, cfg["results_dir"])
+    if a.stage in ("curve", "all"):
+        export_curve(cfg, cfg["results_dir"])
+    if a.stage in ("facts", "all"):
+        export_facts(cfg, cfg["results_dir"])
 
 
 if __name__ == "__main__":

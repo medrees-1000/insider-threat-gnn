@@ -141,3 +141,25 @@ def limitations(m):
         "Explanations are XGBoost TreeSHAP contributions grouped into feature groups: they show what pushed a score up, not why someone is malicious; correlated features share credit.",
         "Graph models (user-PC, domain and email edges) added nothing over these features, so the app uses the tabular model; Neo4j is only used to browse neighbourhoods.",
     ]
+
+
+BANNED_AGGREGATE_KEYS = {"user", "users", "label", "labels", "scenario", "window", "window_start", "window_end", "week_start", "insider", "insiders", "truth", "is_insider"}
+
+
+def assert_aggregates_only(obj, path="$", max_list=64):
+    """Raise if a JSON-able object holds anything per-row: banned key names (user, label, scenario, window, week...), long lists, or user-id-like strings.
+    Used on every file the Overview reads (budget curve, rigor facts) and by the tests."""
+    import re
+
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if str(k).lower() in BANNED_AGGREGATE_KEYS:
+                raise AssertionError(f"{path}.{k}: per-row field name")
+            assert_aggregates_only(v, f"{path}.{k}", max_list)
+    elif isinstance(obj, list):
+        if len(obj) > max_list:
+            raise AssertionError(f"{path}: list of {len(obj)} items looks per-row")
+        for i, v in enumerate(obj):
+            assert_aggregates_only(v, f"{path}[{i}]", max_list)
+    elif isinstance(obj, str) and re.fullmatch(r"[A-Z]{3}\d{4}", obj):
+        raise AssertionError(f"{path}: looks like a user id ({obj})")

@@ -61,9 +61,12 @@ def test_ui_modules_do_not_train_or_write():
             [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""] if isinstance(node, ast.ImportFrom) else [])}
         assert not {n.split(".")[0] for n in full} & banned and not full & banned_modules, (f, full)
     # the app only reads: no training, fitting, writing or opening files (checked on the syntax tree, not on text)
-    forbidden_attrs = {"fit", "train", "to_parquet", "to_csv", "write_text", "write_bytes", "save_model"}
-    for f in ["app/streamlit_app.py", "app/threat_map.py"]:
+    forbidden_attrs = {"fit", "train", "to_parquet", "to_csv", "write_text", "write_bytes", "save_model", "XGBClassifier", "XGBRegressor"}
+    for f in ["app/streamlit_app.py", "app/threat_map.py", "src/itgnn/whatif.py"]:
         for node in ast.walk(ast.parse(Path(f).read_text())):
             if isinstance(node, ast.Call):
                 name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
-                assert name not in forbidden_attrs and not (name == "open" and isinstance(node.func, ast.Name)), (f, name)
+                assert name not in forbidden_attrs, (f, name)
+                if name == "open" and isinstance(node.func, ast.Name):   # reading is fine; writing (mode w/a/x) is not
+                    mode = [a.value for a in node.args[1:2] if isinstance(a, ast.Constant)] + [k.value.value for k in node.keywords if k.arg == "mode" and isinstance(k.value, ast.Constant)]
+                    assert not any(set(str(m)) & set("wax+") for m in mode), (f, mode)
